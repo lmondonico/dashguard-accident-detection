@@ -12,7 +12,7 @@ FRAME_SIZE = (299, 299)  # Frame size (InceptionV3 expects 299x299)
 FEAT_DIM = 2048  # Feature dimension (InceptionV3 features before final FC layer)
 
 # Model Architecture Config
-HIDDEN_DIMS = [512, 256, 128]
+HIDDEN_DIMS = [128]
 DROPOUT_RATE = 0.3
 
 # Training Config
@@ -165,8 +165,8 @@ def get_features(ids, folder):
 
 # Extract features
 percentage_str = str(int(DATASET_PERCENTAGE * 100))
-X_TRAIN_FEATURES_FILE = f"features/X_train_full_features_{percentage_str}pct.npy"
-X_TEST_FEATURES_FILE = "features/X_test_features.npy"
+X_TRAIN_FEATURES_FILE = f"features/baseline/X_train_full_features_{percentage_str}pct.npy"
+X_TEST_FEATURES_FILE = "features/baseline/X_test_features.npy"
 
 if os.path.exists(X_TRAIN_FEATURES_FILE) and os.path.exists(X_TEST_FEATURES_FILE):
     print(
