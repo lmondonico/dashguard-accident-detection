@@ -4,7 +4,7 @@ Baseline script for the Nexar Collision Prediction Challenge.
 
 ##############################################
 
-DATASET_PERCENTAGE = 0.5  # Percentage of the dataset used (0.1 = 10%, 1.0 = 100%)
+DATASET_PERCENTAGE = 1  # Percentage of the dataset used (0.1 = 10%, 1.0 = 100%)
 
 # Feature Extraction Config
 NUM_FRAMES = 16  # Frames to extract per video
@@ -17,18 +17,20 @@ DROPOUT_RATE = 0.3
 
 # Training Config
 BATCH_SIZE = 64
-NUM_EPOCHS = 100
-LEARNING_RATE = 0.001
-WEIGHT_DECAY = 1e-5  # L2 reg weight decay
-TEST_SIZE = 0.2  # Validation split size
+NUM_EPOCHS = 1000
+WEIGHT_DECAY = 1e-2  # L2 reg weight decay
+TEST_SIZE = 0.35  # Validation split size
 RANDOM_STATE = 42
 
-# Learning Rate Scheduler Config
-LR_PATIENCE = 10  # Number of epochs with no improvement after which LR is reduced
-LR_FACTOR = 0.5  # Factor to reduce LR by
+# OneCycleLR Config - Only essential inputs
+INITIAL_LR = 1e-8  # Starting learning rate
+MAX_LR = 5e-7  # Maximum learning rate (peak)
+FINAL_LR = 5e-9  # Final learning rate at the end
+PCT_START = 0.2  # Percentage of training spent increasing LR
 
 SAVE_METRICS_CSV = True
-PRINT_FREQUENCY = 10  # Print training progress every N epochs
+PRINT_FREQUENCY = 20  # Print training progress every N epochs
+PLOT_UPDATE_FREQUENCY = 5  # Update plots every N epochs
 
 ##############################################
 
@@ -38,6 +40,7 @@ import numpy as np
 import pandas as pd
 from tqdm import tqdm
 import matplotlib.pyplot as plt
+from matplotlib.animation import FuncAnimation
 
 from sklearn.model_selection import train_test_split
 from sklearn.preprocessing import StandardScaler
@@ -49,6 +52,9 @@ import torch.optim as optim
 from torch.utils.data import Dataset, DataLoader
 from torchvision import models, transforms
 from torchvision.models import Inception_V3_Weights
+
+# Enable interactive plotting
+plt.ion()
 
 # Set local cache directory for pretrained models
 os.environ["TORCH_HOME"] = "./cache"
@@ -62,7 +68,6 @@ elif torch.cuda.is_available():
 else:
     device = torch.device("cpu")
 print(f"Using device: {device}")
-
 
 # Load CSVs & pad IDs
 df = pd.read_csv("./data/nexar-collision-prediction/train.csv")
@@ -85,6 +90,7 @@ test_dir = "./data/nexar-collision-prediction/test/"
 df["train_videos"] = df["id"] + ".mp4"
 df_test["test_videos"] = df_test["id"] + ".mp4"
 
+# Quick sanity prints
 print(f"Total Train Videos: {len(df['train_videos'])}")
 print(f"Total Test Videos:  {len(df_test['test_videos'])}")
 
@@ -242,6 +248,7 @@ class FeaturesDataset(Dataset):
 # ========================================
 # TRAINING SETUP
 # ========================================
+
 # Create datasets and dataloaders
 train_dataset = FeaturesDataset(X_tr, y_tr)
 val_dataset = FeaturesDataset(X_val, y_val)
@@ -252,17 +259,104 @@ val_loader = DataLoader(val_dataset, batch_size=BATCH_SIZE, shuffle=False)
 # Initialize model
 model = CollisionClassifier(input_dim=FEAT_DIM).to(device)
 criterion = nn.BCELoss()
-optimizer = optim.Adam(model.parameters(), lr=LEARNING_RATE, weight_decay=WEIGHT_DECAY)
-scheduler = optim.lr_scheduler.ReduceLROnPlateau(
-    optimizer, mode="min", patience=LR_PATIENCE, factor=LR_FACTOR
+optimizer = optim.Adam(model.parameters(), lr=INITIAL_LR, weight_decay=WEIGHT_DECAY)
+
+# Calculate total steps for OneCycleLR
+total_steps = NUM_EPOCHS * len(train_loader)
+
+# Initialize OneCycleLR scheduler
+scheduler = optim.lr_scheduler.OneCycleLR(
+    optimizer,
+    max_lr=MAX_LR,
+    total_steps=total_steps,
+    pct_start=PCT_START,
+    div_factor=MAX_LR / INITIAL_LR,
+    final_div_factor=INITIAL_LR / FINAL_LR,
+    anneal_strategy="cos",
 )
+
+# ========================================
+# LIVE PLOTTING SETUP
+# ========================================
+
+# Setup live plotting
+fig, (ax1, ax2, ax3) = plt.subplots(1, 3, figsize=(15, 5))
+fig.suptitle(
+    f"Training Progress ({int(DATASET_PERCENTAGE * 100)}% of data)", fontsize=16
+)
+
+# Initialize empty lists and lines
+train_losses = []
+val_losses = []
+val_aucs = []
+learning_rates = []
+epochs = []
+
+# Setup plot lines
+(line1,) = ax1.plot([], [], "b-", label="Training Loss")
+(line2,) = ax1.plot([], [], "r-", label="Validation Loss")
+(line3,) = ax2.plot([], [], "g-", label="Validation AUC")
+(line4,) = ax3.plot([], [], "orange", label="Learning Rate")
+
+# Setup axes
+ax1.set_xlabel("Epoch")
+ax1.set_ylabel("Loss")
+ax1.set_title("Training and Validation Loss")
+ax1.legend(frameon=False)
+
+ax2.set_xlabel("Epoch")
+ax2.set_ylabel("AUC")
+ax2.set_title("Validation AUC")
+ax2.legend(frameon=False)
+
+ax3.set_xlabel("Epoch")
+ax3.set_ylabel("Learning Rate")
+ax3.set_title("OneCycleLR Schedule")
+ax3.set_yscale("log")
+ax3.legend(frameon=False)
+
+plt.tight_layout()
+
+
+def update_plots():
+    """Update the live plots with current data"""
+    # Update data
+    line1.set_data(epochs, train_losses)
+    line2.set_data(epochs, val_losses)
+    line3.set_data(epochs, val_aucs)
+    line4.set_data(epochs, learning_rates)
+
+    # Update axes limits
+    if epochs:
+        ax1.set_xlim(0, max(epochs) + 1)
+        ax2.set_xlim(0, max(epochs) + 1)
+        ax3.set_xlim(0, max(epochs) + 1)
+
+        # Loss plot - more breathing room
+        if train_losses and val_losses:
+            all_losses = train_losses + val_losses
+            ax1.set_ylim(min(all_losses) * 0.9, max(all_losses) * 1.05)
+
+        # AUC plot - more breathing room
+        if val_aucs:
+            ax2.set_ylim(min(val_aucs) * 0.9, max(val_aucs) * 1.1)
+
+        # LR plot - more breathing room
+        if learning_rates:
+            ax3.set_ylim(min(learning_rates) * 0.5, max(learning_rates) * 2.0)
+
+    # Refresh the plot
+    fig.canvas.draw()
+    fig.canvas.flush_events()
 
 
 # ========================================
 # TRAINING FUNCTIONS
 # ========================================
+
+
 # Training loop with loss tracking and metrics collection
-def train_epoch(model, train_loader, criterion, optimizer, device):
+def train_epoch(model, train_loader, criterion, optimizer, scheduler, device):
     model.train()
     total_loss = 0
     total_samples = 0
@@ -274,7 +368,11 @@ def train_epoch(model, train_loader, criterion, optimizer, device):
         outputs = model(features).squeeze()
         loss = criterion(outputs, labels)
         loss.backward()
+
+        torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+
         optimizer.step()
+        scheduler.step()  # OneCycleLR needs to be stepped after each batch
 
         total_loss += loss.item() * features.size(0)
         total_samples += features.size(0)
@@ -308,26 +406,25 @@ def validate(model, val_loader, criterion, device):
 
 
 # ========================================
-# TRAINING LOOP
+# TRAINING LOOP WITH LIVE PLOTTING
 # ========================================
 
-# Training loop with metrics collection
-train_losses = []
-val_losses = []
-val_aucs = []
-learning_rates = []
+# Training loop with metrics collection and live plotting
 best_auc = 0
-
-# Initialize metrics dataframe
 metrics_data = []
 
-print("Starting training...")
+print("Starting training with live plotting...")
 for epoch in range(NUM_EPOCHS):
-    train_loss = train_epoch(model, train_loader, criterion, optimizer, device)
+    train_loss = train_epoch(
+        model, train_loader, criterion, optimizer, scheduler, device
+    )
     val_loss, val_auc, _ = validate(model, val_loader, criterion, device)
-    current_lr = optimizer.param_groups[0]["lr"]
-    scheduler.step(val_loss)
 
+    # Get current learning rate
+    current_lr = optimizer.param_groups[0]["lr"]
+
+    # Store metrics
+    epochs.append(epoch + 1)
     train_losses.append(train_loss)
     val_losses.append(val_loss)
     val_aucs.append(val_auc)
@@ -356,9 +453,17 @@ for epoch in range(NUM_EPOCHS):
         )
         print(f"Learning Rate: {current_lr:.6f}, Best Val AUC: {best_auc:.4f}")
 
+    # Update plots
+    if (epoch + 1) % PLOT_UPDATE_FREQUENCY == 0:
+        update_plots()
+
+# Final plot update
+update_plots()
+
 # ========================================
 # EVALUATION AND VISUALIZATION
 # ========================================
+
 # Save metrics to CSV
 if SAVE_METRICS_CSV:
     metrics_df = pd.DataFrame(metrics_data)
@@ -371,43 +476,14 @@ model.load_state_dict(torch.load(f"best_model_{percentage_str}pct.pth"))
 _, final_auc, val_predictions = validate(model, val_loader, criterion, device)
 print(f"\nFinal Validation ROC-AUC: {final_auc:.4f}")
 
-# Plot training curves
-plt.figure(figsize=(15, 5))
-
-# Loss curves
-plt.subplot(1, 3, 1)
-plt.plot(train_losses, label="Training Loss", color="blue")
-plt.plot(val_losses, label="Validation Loss", color="red")
-plt.xlabel("Epoch")
-plt.ylabel("Loss")
-plt.title(f"Training and Validation Loss ({int(DATASET_PERCENTAGE * 100)}% of data)")
-plt.legend()
-plt.grid(True)
-
-# AUC curve
-plt.subplot(1, 3, 2)
-plt.plot(val_aucs, label="Validation AUC", color="green")
-plt.xlabel("Epoch")
-plt.ylabel("AUC")
-plt.title(f"Validation AUC ({int(DATASET_PERCENTAGE * 100)}% of data)")
-plt.legend()
-plt.grid(True)
-
-# Learning rate
-plt.subplot(1, 3, 3)
-plt.plot(learning_rates, label="Learning Rate", color="orange")
-plt.xlabel("Epoch")
-plt.ylabel("Learning Rate")
-plt.title("Learning Rate Schedule")
-plt.legend()
-plt.grid(True)
-plt.yscale("log")
-
-plt.tight_layout()
+# Save the final plot
 plot_filename = f"training_curves_{percentage_str}pct.png"
 plt.savefig(plot_filename, dpi=300, bbox_inches="tight")
-plt.show()
 print(f"Training curves saved → {plot_filename}")
+
+# Keep the plot window open
+plt.ioff()  # Turn off interactive mode
+plt.show()  # Keep the window open
 
 # ========================================
 # INFERENCE AND SUBMISSION
