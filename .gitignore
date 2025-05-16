@@ -1,3 +1,15 @@
+.pycache
+cache/
+__pycache__/
+.vscode/
+.venv_cs231n/
 data/**
 cache/**
 features/**
+*.DS_Store
+data/
+*.png
+*.pth
+*.npy
+*.csv
+*.pyc
