@@ -26,7 +26,7 @@ class Config:
     NUM_FRAMES = 16
     FRAME_SIZE = (299, 299)
     CRASH_FOCUS_RATIO = 0.7  # 70% of frames around crash time
-    TIME_WINDOW_SECONDS = 2.0  # Focus window around crash time
+    TIME_WINDOW_SECONDS = 5.0  # Focus window around crash time
 
     # Model architecture
     INPUT_DIM = 2048
@@ -73,7 +73,7 @@ def extract_temporal_frames(
     crash_time,
     num_frames=16,
     crash_focus_ratio=0.7,
-    time_window=2.0,
+    time_window=5.0,
     frame_size=(299, 299),
 ):
     """
@@ -81,7 +81,7 @@ def extract_temporal_frames(
 
     Args:
         video_path: Path to video file
-        crash_time: Time of crash event in seconds
+        crash_time: Time of crash event in seconds (can be NaN)
         num_frames: Total number of frames to extract
         crash_focus_ratio: Fraction of frames to concentrate around crash time
         time_window: Time window (seconds) around crash to focus on
@@ -96,49 +96,57 @@ def extract_temporal_frames(
         cap.release()
         return np.empty((0, *frame_size, 3), dtype=np.uint8)
 
-    # Calculate frame positions
-    crash_frame = int(crash_time * fps)
-    crash_frame = max(0, min(crash_frame, total_video_frames - 1))
+    # Handle NaN crash times - fall back to uniform sampling
+    if pd.isna(crash_time) or crash_time < 0:
+        # Use uniform sampling when crash time is unknown
+        frame_positions = np.linspace(0, total_video_frames - 1, num_frames, dtype=int)
+    else:
+        # Calculate frame positions with crash time focus
+        crash_frame = int(crash_time * fps)
+        crash_frame = max(0, min(crash_frame, total_video_frames - 1))
 
-    # Frames around crash time
-    crash_frames_count = int(num_frames * crash_focus_ratio)
-    context_frames_count = num_frames - crash_frames_count
+        # Frames around crash time
+        crash_frames_count = int(num_frames * crash_focus_ratio)
+        context_frames_count = num_frames - crash_frames_count
 
-    # Window around crash time
-    window_frames = int(time_window * fps)
-    start_crash_window = max(0, crash_frame - window_frames // 2)
-    end_crash_window = min(total_video_frames, crash_frame + window_frames // 2)
+        # Window around crash time
+        window_frames = int(time_window * fps)
+        start_crash_window = max(0, crash_frame - window_frames // 2)
+        end_crash_window = min(total_video_frames, crash_frame + window_frames // 2)
 
-    # Generate frame positions
-    frame_positions = []
+        # Generate frame positions
+        frame_positions = []
 
-    # High-density frames around crash
-    if end_crash_window > start_crash_window:
-        crash_positions = np.linspace(
-            start_crash_window, end_crash_window, crash_frames_count, dtype=int
-        )
-        frame_positions.extend(crash_positions)
+        # High-density frames around crash
+        if end_crash_window > start_crash_window:
+            crash_positions = np.linspace(
+                start_crash_window, end_crash_window, crash_frames_count, dtype=int
+            )
+            frame_positions.extend(crash_positions)
 
-    # Context frames from rest of video
-    if context_frames_count > 0:
-        # Before crash window
-        before_frames = context_frames_count // 2
-        if start_crash_window > 0:
-            before_positions = np.linspace(
-                0, start_crash_window, before_frames + 1, dtype=int
-            )[:-1]
-            frame_positions.extend(before_positions)
+        # Context frames from rest of video
+        if context_frames_count > 0:
+            # Before crash window
+            before_frames = context_frames_count // 2
+            if start_crash_window > 0:
+                before_positions = np.linspace(
+                    0, start_crash_window, before_frames + 1, dtype=int
+                )[:-1]
+                frame_positions.extend(before_positions)
 
-        # After crash window
-        after_frames = context_frames_count - before_frames
-        if end_crash_window < total_video_frames:
-            after_positions = np.linspace(
-                end_crash_window, total_video_frames - 1, after_frames + 1, dtype=int
-            )[1:]
-            frame_positions.extend(after_positions)
+            # After crash window
+            after_frames = context_frames_count - before_frames
+            if end_crash_window < total_video_frames:
+                after_positions = np.linspace(
+                    end_crash_window,
+                    total_video_frames - 1,
+                    after_frames + 1,
+                    dtype=int,
+                )[1:]
+                frame_positions.extend(after_positions)
 
-    # Sort positions and ensure uniqueness
-    frame_positions = sorted(list(set(frame_positions)))
+        # Sort positions and ensure uniqueness
+        frame_positions = sorted(list(set(frame_positions)))
 
     # Extract frames
     frames_list = []
