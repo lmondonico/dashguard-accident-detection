@@ -7,7 +7,7 @@ Baseline script for the Nexar Collision Prediction Challenge.
 DATASET_PERCENTAGE = 1  # Percentage of the dataset used (0.1 = 10%, 1.0 = 100%)
 
 # Feature Extraction Config
-NUM_FRAMES = 16  # Frames to extract per video
+NUM_FRAMES = 32  # Frames to extract per video
 FRAME_SIZE = (299, 299)  # Frame size (InceptionV3 expects 299x299)
 FEAT_DIM = 2048  # Feature dimension (InceptionV3 features before final FC layer)
 

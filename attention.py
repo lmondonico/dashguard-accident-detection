@@ -28,7 +28,7 @@ os.makedirs("./cache", exist_ok=True)
 DATASET_PERCENTAGE = 1.0  # Percentage of the dataset used
 
 # Feature Extraction Config
-NUM_FRAMES = 16
+NUM_FRAMES = 32
 FRAME_SIZE = (299, 299)
 FEAT_DIM = 2048 # From InceptionV3 (pooling='avg' on the base model output per frame)
 
