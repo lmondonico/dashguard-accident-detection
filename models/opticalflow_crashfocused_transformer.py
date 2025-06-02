@@ -1,7 +1,5 @@
-#!/usr/bin/env python3
-# -*- coding: utf-8 -*-
-
 import os
+import sys
 import cv2
 import numpy as np
 import pandas as pd
@@ -16,8 +14,12 @@ from tqdm import tqdm
 from torchvision import models, transforms
 from torchvision.models import Inception_V3_Weights
 
-from hierarchical_transformer import HierarchicalTransformer
-from data_loader import create_data_loaders
+current_dir = os.path.dirname(os.path.abspath(__file__))
+codebase_dir = os.path.join(current_dir, "..")
+sys.path.append(codebase_dir)
+
+from module_hierarchical_transformer import HierarchicalTransformer
+from utils.data_loader import create_data_loaders
 
 
 # Configuration
@@ -544,7 +546,7 @@ def load_multimodal_features(config):
         X_test_rgb = np.load(config.TEST_RGB_FEATURES_FILE)
 
         # Load labels
-        data_base_path = os.path.expanduser("./data/nexar-collision-prediction/")
+        data_base_path = os.path.expanduser("./data-nexar/")
         df = pd.read_csv(os.path.join(data_base_path, "train.csv"))
         df["id"] = df["id"].astype(str).str.zfill(5)
 
@@ -570,7 +572,7 @@ def load_multimodal_features(config):
     print("Generating branch-specific features...")
 
     # Load data
-    data_base_path = os.path.expanduser("./data/nexar-collision-prediction/")
+    data_base_path = os.path.expanduser("./data-nexar/")
     df = pd.read_csv(os.path.join(data_base_path, "train.csv"))
     df_test = pd.read_csv(os.path.join(data_base_path, "test.csv"))
     df["id"] = df["id"].astype(str).str.zfill(5)
@@ -929,7 +931,7 @@ def main():
             test_predictions.extend(outputs.cpu().numpy().flatten())
 
     # Create submission file
-    data_base_path = os.path.expanduser("./data/nexar-collision-prediction/")
+    data_base_path = os.path.expanduser("./data-nexar/")
     df_test = pd.read_csv(os.path.join(data_base_path, "test.csv"))
     df_test["id"] = df_test["id"].astype(str).str.zfill(5)
 

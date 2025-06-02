@@ -70,8 +70,8 @@ else:
 print(f"Using device: {device}")
 
 # Load CSVs & pad IDs
-df = pd.read_csv("./data/nexar-collision-prediction/train.csv")
-df_test = pd.read_csv("./data/nexar-collision-prediction/test.csv")
+df = pd.read_csv("./data-nexar/train.csv")
+df_test = pd.read_csv("./data-nexar/test.csv")
 df["id"] = df["id"].astype(str).str.zfill(5)
 df_test["id"] = df_test["id"].astype(str).str.zfill(5)
 
@@ -84,8 +84,8 @@ if DATASET_PERCENTAGE < 1.0:
     print(f"Training set reduced from full size to {len(df)} samples")
 
 # Define video folders & filenames
-train_dir = "./data/nexar-collision-prediction/train/"
-test_dir = "./data/nexar-collision-prediction/test/"
+train_dir = "./data-nexar/train/"
+test_dir = "./data-nexar/test/"
 
 df["train_videos"] = df["id"] + ".mp4"
 df_test["test_videos"] = df_test["id"] + ".mp4"
@@ -165,7 +165,9 @@ def get_features(ids, folder):
 
 # Extract features
 percentage_str = str(int(DATASET_PERCENTAGE * 100))
-X_TRAIN_FEATURES_FILE = f"features/baseline/X_train_full_features_{percentage_str}pct.npy"
+X_TRAIN_FEATURES_FILE = (
+    f"features/baseline/X_train_full_features_{percentage_str}pct.npy"
+)
 X_TEST_FEATURES_FILE = "features/baseline/X_test_features.npy"
 
 if os.path.exists(X_TRAIN_FEATURES_FILE) and os.path.exists(X_TEST_FEATURES_FILE):

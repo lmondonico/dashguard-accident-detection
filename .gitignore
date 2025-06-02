@@ -3,13 +3,11 @@ cache/
 __pycache__/
 .vscode/
 .venv_cs231n/
-data/
+data-nexar/
 cache/
 features/
 results/
-
 *.DS_Store
-data/
 *.png
 *.pth
 *.npy

@@ -71,7 +71,7 @@ def load_preprocessed_data(features_dir, dataset_percentage=1.0, random_state=42
     X_test_sequences = np.load(test_features_file)
 
     # Load labels
-    data_base_path = os.path.expanduser("./data/nexar-collision-prediction/")
+    data_base_path = os.path.expanduser("./data-nexar/")
     df = pd.read_csv(os.path.join(data_base_path, "train.csv"))
     df["id"] = df["id"].astype(str).str.zfill(5)
 

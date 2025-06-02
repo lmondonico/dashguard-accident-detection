@@ -1,4 +1,5 @@
 import os
+import sys
 import numpy as np
 import pandas as pd
 import torch
@@ -9,8 +10,12 @@ import matplotlib.pyplot as plt
 from sklearn.metrics import roc_auc_score
 from tqdm import tqdm
 
-from transformer_model import TransformerAccidentDetector
-from data_loader import load_preprocessed_data, create_data_loaders
+current_dir = os.path.dirname(os.path.abspath(__file__))
+codebase_dir = os.path.join(current_dir, "..")
+sys.path.append(codebase_dir)
+
+from module_hierarchical_transformer import HierarchicalTransformer
+from utils.data_loader import load_preprocessed_data, create_data_loaders
 
 
 # Configuration
@@ -19,51 +24,55 @@ class Config:
     FEATURES_DIR = "features/attention/"
     DATASET_PERCENTAGE = 1.0
 
-    # Model architecture - Reduced complexity
+    # Model architecture
     INPUT_DIM = 2048
-    D_MODEL = 256  # Reduced from 512
+    D_MODEL = 512
     NUM_HEADS = 8
-    NUM_LAYERS = 3  # Reduced from 6
-    D_FF = 1024  # Reduced from 2048
+    NUM_LAYERS = 2
+    D_FF = 512
     MAX_SEQ_LEN = 16
-    DROPOUT = 0.2  # Increased dropout
+    DROPOUT = 0.3
 
     # Training parameters
-    BATCH_SIZE = 64  # Increased batch size
-    NUM_EPOCHS = 100  # Reduced epochs for OneCycleLR
-    LEARNING_RATE = 5e-6  # Higher starting LR for OneCycleLR
+    BATCH_SIZE = 32  # Increased batch size
+    NUM_EPOCHS = 40  # Reduced epochs for OneCycleLR
+    LEARNING_RATE = 1e-6  # Higher starting LR for OneCycleLR
     WEIGHT_DECAY = 1e-3
     TEST_SIZE = 0.2
     RANDOM_STATE = 42
 
     # OneCycleLR parameters
-    MAX_LR = 5e-6
-    PCT_START = 0.3  # Spend 30% of training increasing LR
-    DIV_FACTOR = 25  # Initial LR = MAX_LR / DIV_FACTOR
-    FINAL_DIV_FACTOR = 1e2  # Final LR = MAX_LR / FINAL_DIV_FACTOR
+    MAX_LR = 1e-6
+    PCT_START = 0.3
+    DIV_FACTOR = 25
+    FINAL_DIV_FACTOR = 1e3
 
     # Logging
-    PRINT_FREQUENCY = 2
+    PRINT_FREQUENCY = 10
 
     # Output paths
     @property
     def MODEL_SAVE_PATH(self):
-        return f"best_transformer_onecycle_{int(self.DATASET_PERCENTAGE * 100)}pct.pth"
+        return (
+            f"best_hierarchical_transformer_{int(self.DATASET_PERCENTAGE * 100)}pct.pth"
+        )
 
     @property
     def PLOT_FILENAME(self):
-        return f"training_curves_transformer_onecycle_{int(self.DATASET_PERCENTAGE * 100)}pct.png"
+        return (
+            f"training_curves_hierarchical_{int(self.DATASET_PERCENTAGE * 100)}pct.png"
+        )
 
     @property
     def SUBMISSION_FILENAME(self):
-        return f"submission_transformer_onecycle_{int(self.DATASET_PERCENTAGE * 100)}pct.csv"
+        return f"submission_hierarchical_{int(self.DATASET_PERCENTAGE * 100)}pct.csv"
 
 
 class LivePlotter:
     def __init__(self):
         plt.ion()
-        self.fig, self.axes = plt.subplots(2, 2, figsize=(12, 8))
-        self.fig.suptitle("Training Progress - OneCycleLR", fontsize=16)
+        self.fig, self.axes = plt.subplots(1, 3, figsize=(15, 4))
+        self.fig.suptitle("Hierarchical Transformer Training", fontsize=16)
 
         self.train_losses = []
         self.val_losses = []
@@ -71,42 +80,28 @@ class LivePlotter:
         self.learning_rates = []
 
         # Set up axes
-        self.axes[0, 0].set_title("Loss Curves")
-        self.axes[0, 0].set_xlabel("Epoch")
-        self.axes[0, 0].set_ylabel("Loss")
-        self.axes[0, 0].grid(True)
+        self.axes[0].set_title("Loss Curves")
+        self.axes[0].set_xlabel("Epoch")
+        self.axes[0].set_ylabel("Loss")
 
-        self.axes[0, 1].set_title("Validation AUC")
-        self.axes[0, 1].set_xlabel("Epoch")
-        self.axes[0, 1].set_ylabel("AUC")
-        self.axes[0, 1].grid(True)
+        self.axes[1].set_title("Validation AUC")
+        self.axes[1].set_xlabel("Epoch")
+        self.axes[1].set_ylabel("AUC")
 
-        self.axes[1, 0].set_title("Learning Rate (OneCycleLR)")
-        self.axes[1, 0].set_xlabel("Epoch")
-        self.axes[1, 0].set_ylabel("Learning Rate")
-        self.axes[1, 0].grid(True)
-
-        self.axes[1, 1].set_title("Training Progress")
-        self.axes[1, 1].set_xlabel("Validation Loss")
-        self.axes[1, 1].set_ylabel("Validation AUC")
-        self.axes[1, 1].grid(True)
+        self.axes[2].set_title("Learning Rate")
+        self.axes[2].set_xlabel("Epoch")
+        self.axes[2].set_ylabel("Learning Rate")
 
         # Initialize lines
-        (self.train_loss_line,) = self.axes[0, 0].plot(
-            [], [], "b-", label="Training Loss"
-        )
-        (self.val_loss_line,) = self.axes[0, 0].plot(
-            [], [], "r-", label="Validation Loss"
-        )
-        self.axes[0, 0].legend()
+        (self.train_loss_line,) = self.axes[0].plot([], [], "b-", label="Train")
+        (self.val_loss_line,) = self.axes[0].plot([], [], "r-", label="Val")
+        self.axes[0].legend(frameon=False)
 
-        (self.val_auc_line,) = self.axes[0, 1].plot(
-            [], [], "g-", label="Validation AUC"
-        )
-        self.axes[0, 1].legend()
+        (self.val_auc_line,) = self.axes[1].plot([], [], "g-", label="Val AUC")
+        self.axes[1].legend(frameon=False)
 
-        (self.lr_line,) = self.axes[1, 0].plot([], [], "orange", label="Learning Rate")
-        self.axes[1, 0].legend()
+        (self.lr_line,) = self.axes[2].plot([], [], "orange", label="LR")
+        self.axes[2].legend(frameon=False)
 
         plt.tight_layout()
         plt.show()
@@ -122,28 +117,18 @@ class LivePlotter:
         # Update loss curves
         self.train_loss_line.set_data(epochs, self.train_losses)
         self.val_loss_line.set_data(epochs, self.val_losses)
-        self.axes[0, 0].relim()
-        self.axes[0, 0].autoscale_view()
+        self.axes[0].relim()
+        self.axes[0].autoscale_view()
 
         # Update AUC curve
         self.val_auc_line.set_data(epochs, self.val_aucs)
-        self.axes[0, 1].relim()
-        self.axes[0, 1].autoscale_view()
+        self.axes[1].relim()
+        self.axes[1].autoscale_view()
 
-        # Update learning rate curve (don't use log scale for OneCycleLR)
+        # Update learning rate curve
         self.lr_line.set_data(epochs, self.learning_rates)
-        self.axes[1, 0].relim()
-        self.axes[1, 0].autoscale_view()
-
-        # Update scatter plot
-        self.axes[1, 1].clear()
-        self.axes[1, 1].scatter(
-            self.val_losses, self.val_aucs, alpha=0.6, c=epochs, cmap="viridis"
-        )
-        self.axes[1, 1].set_title("Loss vs AUC Progression")
-        self.axes[1, 1].set_xlabel("Validation Loss")
-        self.axes[1, 1].set_ylabel("Validation AUC")
-        self.axes[1, 1].grid(True)
+        self.axes[2].relim()
+        self.axes[2].autoscale_view()
 
         self.fig.canvas.draw()
         self.fig.canvas.flush_events()
@@ -151,7 +136,7 @@ class LivePlotter:
 
     def save_final_plot(self, filename):
         plt.ioff()
-        self.fig.savefig(filename, dpi=300, bbox_inches="tight")
+        self.fig.savefig(filename, dpi=600, bbox_inches="tight")
         print(f"Final training curves saved to {filename}")
 
     def close(self):
@@ -159,7 +144,7 @@ class LivePlotter:
         plt.close(self.fig)
 
 
-def train_epoch(model, train_loader, criterion, optimizer, device):
+def train_epoch(model, train_loader, criterion, optimizer, scheduler, device):
     model.train()
     total_loss = 0
 
@@ -171,10 +156,11 @@ def train_epoch(model, train_loader, criterion, optimizer, device):
         loss = criterion(outputs, labels)
         loss.backward()
 
-        # Gradient clipping for stability
+        # Gradient clipping
         torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
 
         optimizer.step()
+        scheduler.step()
         total_loss += loss.item()
 
     return total_loss / len(train_loader)
@@ -231,9 +217,9 @@ def main():
         random_state=config.RANDOM_STATE,
     )
 
-    # Initialize model with reduced complexity
-    print("Initializing transformer model...")
-    model = TransformerAccidentDetector(
+    # Initialize model
+    print("Initializing hierarchical transformer...")
+    model = HierarchicalTransformer(
         input_dim=config.INPUT_DIM,
         d_model=config.D_MODEL,
         num_heads=config.NUM_HEADS,
@@ -269,31 +255,15 @@ def main():
     live_plotter = LivePlotter()
 
     # Training loop
-    print("Starting training with OneCycleLR...")
+    print("Starting hierarchical transformer training...")
     best_auc = 0.0
 
     try:
         for epoch in range(config.NUM_EPOCHS):
-            # Training with per-batch LR updates
-            model.train()
-            total_loss = 0
-
-            for features, labels in tqdm(train_loader, desc=f"Epoch {epoch + 1}"):
-                features, labels = features.to(device), labels.to(device)
-
-                optimizer.zero_grad()
-                outputs = model(features)
-                loss = criterion(outputs, labels)
-                loss.backward()
-
-                # Gradient clipping
-                torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
-
-                optimizer.step()
-                scheduler.step()  # Update LR after each batch
-                total_loss += loss.item()
-
-            train_loss = total_loss / len(train_loader)
+            # Training
+            train_loss = train_epoch(
+                model, train_loader, criterion, optimizer, scheduler, device
+            )
 
             # Validation
             val_loss, val_auc = validate(model, val_loader, criterion, device)
@@ -355,7 +325,7 @@ def main():
             test_predictions.extend(outputs.cpu().numpy().flatten())
 
     # Create submission file
-    data_base_path = os.path.expanduser("./data/nexar-collision-prediction/")
+    data_base_path = os.path.expanduser("./data-nexar/")
     df_test = pd.read_csv(os.path.join(data_base_path, "test.csv"))
     df_test["id"] = df_test["id"].astype(str).str.zfill(5)
 
@@ -363,7 +333,7 @@ def main():
     submission.to_csv(config.SUBMISSION_FILENAME, index=False)
     print(f"Submission saved to {config.SUBMISSION_FILENAME}")
 
-    print(f"\nTRANSFORMER MODEL TRAINING SUMMARY")
+    print(f"\nHIERARCHICAL TRANSFORMER SUMMARY")
     print(f"Dataset used: {config.DATASET_PERCENTAGE * 100}% ({len(X_train)} samples)")
     print(f"Best validation AUC: {best_auc:.4f}")
     print(f"Final validation AUC: {final_auc:.4f}")
