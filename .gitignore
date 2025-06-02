@@ -3,9 +3,11 @@ cache/
 __pycache__/
 .vscode/
 .venv_cs231n/
-data/**
-cache/**
-features/**
+data/
+cache/
+features/
+results/
+
 *.DS_Store
 data/
 *.png
