@@ -13,13 +13,13 @@ import cv2
 from torchvision import models, transforms
 import timm
 
-efficientnet_dir = os.path.dirname(os.path.abspath(__file__))
-transformer_dir = os.path.join(efficientnet_dir, "..", "data")
-if transformer_dir not in sys.path:
-    sys.path.append(transformer_dir)
+# Add the transformer directory to path
+current_dir = os.path.dirname(os.path.abspath(__file__))
+transformer_dir = os.path.join(current_dir, "..", "transformer")
+sys.path.append(transformer_dir)
 
-from transformer.hierarchical_transformer import HierarchicalTransformer
-from transformer.data_loader import create_data_loaders
+from hierarchical_transformer import HierarchicalTransformer
+from data_loader import create_data_loaders
 
 
 # Configuration
@@ -204,7 +204,7 @@ def extract_frames_enhanced(path, num_frames=16, size=(300, 300)):
 
 
 def load_efficientnet_features():
-    """Load or generate EfficientNet-based features."""
+    """Load or generate EfficientNet-based features using attention feature extraction."""
     config = Config()
 
     # Create features directory
@@ -216,7 +216,50 @@ def load_efficientnet_features():
     )
     test_features_file = os.path.join(config.FEATURES_DIR, "X_test_efficient.npy")
 
-    # Load data
+    # Try to load existing attention features first
+    attention_train_file = (
+        f"features/attention/X_train_sequences_{percentage_str}pct.npy"
+    )
+    attention_test_file = "features/attention/X_test_sequences.npy"
+
+    if os.path.exists(attention_train_file) and os.path.exists(attention_test_file):
+        print(f"Loading existing attention features from {attention_train_file}")
+        X_train_sequences = np.load(attention_train_file)
+        X_test_sequences = np.load(attention_test_file)
+
+        # Load labels
+        data_base_path = os.path.expanduser("./data/nexar-collision-prediction/")
+        df = pd.read_csv(os.path.join(data_base_path, "train.csv"))
+        df["id"] = df["id"].astype(str).str.zfill(5)
+
+        if config.DATASET_PERCENTAGE < 1.0:
+            df = df.sample(
+                frac=config.DATASET_PERCENTAGE, random_state=config.RANDOM_STATE
+            ).reset_index(drop=True)
+
+        y_train = df["target"].values
+        return X_train_sequences, X_test_sequences, y_train
+
+    # If attention features don't exist, create them
+    if os.path.exists(train_features_file) and os.path.exists(test_features_file):
+        print(f"Loading EfficientNet features from {train_features_file}")
+        X_train_sequences = np.load(train_features_file)
+        X_test_sequences = np.load(test_features_file)
+
+        # Load labels
+        data_base_path = os.path.expanduser("./data/nexar-collision-prediction/")
+        df = pd.read_csv(os.path.join(data_base_path, "train.csv"))
+        df["id"] = df["id"].astype(str).str.zfill(5)
+
+        if config.DATASET_PERCENTAGE < 1.0:
+            df = df.sample(
+                frac=config.DATASET_PERCENTAGE, random_state=config.RANDOM_STATE
+            ).reset_index(drop=True)
+
+        y_train = df["target"].values
+        return X_train_sequences, X_test_sequences, y_train
+
+    # Load data for feature extraction
     data_base_path = os.path.expanduser("./data/nexar-collision-prediction/")
     df = pd.read_csv(os.path.join(data_base_path, "train.csv"))
     df_test = pd.read_csv(os.path.join(data_base_path, "test.csv"))
@@ -230,13 +273,6 @@ def load_efficientnet_features():
 
     train_dir = os.path.join(data_base_path, "train/")
     test_dir = os.path.join(data_base_path, "test/")
-
-    if os.path.exists(train_features_file) and os.path.exists(test_features_file):
-        print(f"Loading EfficientNet features from {train_features_file}")
-        X_train_sequences = np.load(train_features_file)
-        X_test_sequences = np.load(test_features_file)
-        y_train = df["target"].values
-        return X_train_sequences, X_test_sequences, y_train
 
     # Set up feature extraction
     device = torch.device(
