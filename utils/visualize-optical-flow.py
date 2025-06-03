@@ -5,6 +5,7 @@ import os
 import cv2
 import numpy as np
 import matplotlib.pyplot as plt
+from matplotlib.widgets import Button # Import Button widget
 
 # --- Configuration ---
 # Path to your dataset
@@ -13,29 +14,28 @@ TRAIN_VIDEO_DIR = os.path.join(DATA_BASE_PATH, "train/")
 TEST_VIDEO_DIR = os.path.join(DATA_BASE_PATH, "test/")
 
 # Video ID to visualize
-VIDEO_ID_TO_VISUALIZE = "00022"  # <--- CHANGE THIS
-VIDEO_SET_DIRECTORY = TRAIN_VIDEO_DIR  # <--- CHANGE THIS if it's a test video
+VIDEO_ID_TO_VISUALIZE = "00021"
+VIDEO_SET_DIRECTORY = TRAIN_VIDEO_DIR
 
-NUM_FRAMES_TO_EXTRACT = 16
-FRAME_SIZE = (299, 299)
-NUM_FLOW_FIELDS_TO_DISPLAY = 30  # Let's display one to see the quiver plot clearly
+NUM_FRAMES_TO_EXTRACT = 30 # Number of RGB frames to extract initially
+FRAME_SIZE = (1280, 720)
+QUIVER_STEP = 30 # Draw an arrow every 'QUIVER_STEP' pixels for clarity
 
 
-# --- HELPER FUNCTIONS (extract_rgb_frames, calculate_optical_flow - assumed to be the same as before) ---
 def extract_rgb_frames(video_path, num_frames=NUM_FRAMES_TO_EXTRACT, size=FRAME_SIZE):
-    """Extracts num_frames from a video, resized."""
     cap = cv2.VideoCapture(video_path)
     total_video_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
     if total_video_frames <= 0:
         cap.release()
         print(f"Warning: Could not read video or video is empty: {video_path}")
         return np.empty((0, *size, 3), dtype=np.uint8)
+    
+    # Ensure we don't try to extract more frames than available
     if total_video_frames < num_frames:
         frames_to_extract_indices = np.arange(0, total_video_frames)
     else:
-        frames_to_extract_indices = np.linspace(
-            0, total_video_frames - 1, num_frames, dtype=int
-        )
+        frames_to_extract_indices = np.linspace(0, total_video_frames - 1, num_frames, dtype=int)
+        
     extracted_frames = []
     for idx in frames_to_extract_indices:
         cap.set(cv2.CAP_PROP_POS_FRAMES, idx)
@@ -46,6 +46,7 @@ def extract_rgb_frames(video_path, num_frames=NUM_FRAMES_TO_EXTRACT, size=FRAME_
         frame = cv2.resize(frame, size)
         extracted_frames.append(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
     cap.release()
+    
     if not extracted_frames:
         print(f"Warning: No frames extracted for video: {video_path}")
         return np.empty((0, *size, 3), dtype=np.uint8)
@@ -53,84 +54,97 @@ def extract_rgb_frames(video_path, num_frames=NUM_FRAMES_TO_EXTRACT, size=FRAME_
 
 
 def calculate_optical_flow(frames_sequence):
-    """Calculates dense optical flow between consecutive frames in a sequence."""
     flow_sequence = []
     if len(frames_sequence) < 2:
         print("Warning: Need at least 2 frames to calculate optical flow.")
         return np.empty((0, *frames_sequence.shape[1:3], 2), dtype=np.float32)
+    
     prev_gray = cv2.cvtColor(frames_sequence[0], cv2.COLOR_RGB2GRAY)
     for i in range(1, len(frames_sequence)):
         current_gray = cv2.cvtColor(frames_sequence[i], cv2.COLOR_RGB2GRAY)
-        flow = cv2.calcOpticalFlowFarneback(
-            prev_gray, current_gray, None, 0.5, 3, 15, 3, 5, 1.2, 0
-        )
+        flow = cv2.calcOpticalFlowFarneback(prev_gray, current_gray, None, 0.5, 3, 15, 3, 5, 1.2, 0)
         flow_sequence.append(flow)
         prev_gray = current_gray
-    return (
-        np.stack(flow_sequence)
-        if flow_sequence
-        else np.empty((0, *frames_sequence.shape[1:3], 2), dtype=np.float32)
-    )
+        
+    return np.stack(flow_sequence) if flow_sequence else np.empty((0, *frames_sequence.shape[1:3], 2), dtype=np.float32)
+
+class OpticalFlowNavigator:
+    def __init__(self, rgb_frames_all, flow_fields_all, video_id_str, quiver_step_val):
+        self.rgb_frames = rgb_frames_all
+        self.flow_fields = flow_fields_all
+        self.video_id = video_id_str
+        self.quiver_step = quiver_step_val
+        self.current_flow_index = 0
+
+        if self.flow_fields is None or len(self.flow_fields) == 0:
+            print("Error: No flow fields provided to OpticalFlowNavigator.")
+            self.fig = None
+            return
+
+        self.fig, self.ax = plt.subplots(figsize=(10, 8))
+        plt.subplots_adjust(bottom=0.25) # Make space for buttons and title
+
+        self._draw_frame_and_flow()
+
+        ax_prev = plt.axes([0.7, 0.05, 0.1, 0.075])
+        ax_next = plt.axes([0.81, 0.05, 0.1, 0.075])
+        self.btn_prev = Button(ax_prev, 'Previous')
+        self.btn_next = Button(ax_next, 'Next')
+
+        self.btn_prev.on_clicked(self._prev_flow)
+        self.btn_next.on_clicked(self._next_flow)
 
 
-# --- NEW: Visualization with Arrows (Quiver Plot) ---
-def visualize_optical_flow_arrows(rgb_frame, flow_field, frame_index_str="", step=16):
-    """
-    Visualizes dense optical flow using arrows (quiver plot) on a sparse grid.
+    def _draw_frame_and_flow(self):
+        if not (0 <= self.current_flow_index < len(self.flow_fields)):
+            self.ax.clear()
+            self.ax.text(0.5, 0.5, "Invalid flow index.", horizontalalignment='center', verticalalignment='center')
+            self.ax.axis('off')
+            plt.draw()
+            return
 
-    Args:
-        rgb_frame (np.array): The original RGB frame (H, W, 3).
-        flow_field (np.array): The 2-channel optical flow field (H, W, 2) (dx, dy).
-        frame_index_str (str): String to identify the frame number in the title.
-        step (int): Draw an arrow every 'step' pixels.
-    """
-    h, w = flow_field.shape[:2]
+        self.ax.clear()
 
-    # Create a grid of points to draw arrows
-    y, x = (
-        np.mgrid[step // 2 : h : step, step // 2 : w : step].reshape(2, -1).astype(int)
-    )
-    fx, fy = flow_field[y, x].T  # dx, dy components at grid points
+        base_rgb_frame = self.rgb_frames[self.current_flow_index]
+        flow_field = self.flow_fields[self.current_flow_index]
 
-    plt.figure(figsize=(8, 8))  # Adjust figure size as needed
-    plt.imshow(rgb_frame)
+        h, w = flow_field.shape[:2]
+        y, x = np.mgrid[self.quiver_step // 2 : h : self.quiver_step,
+                        self.quiver_step // 2 : w : self.quiver_step].reshape(2, -1).astype(int)
+        
+        # Ensure indices are within bounds for flow_field
+        y = np.clip(y, 0, h - 1)
+        x = np.clip(x, 0, w - 1)
+        
+        fx, fy = flow_field[y, x].T
 
-    # plt.quiver(x_coords, y_coords, u_flow_component, v_flow_component, **kwargs)
-    # Note: quiver's y-axis is typically inverted compared to image y-axis,
-    # but imshow handles the image display correctly, so using y directly is fine.
-    # fx is dx (flow in x-direction), fy is dy (flow in y-direction)
-    plt.quiver(
-        x,
-        y,
-        fx,
-        fy,
-        color="red",
-        angles="xy",
-        scale_units="xy",
-        scale=1,
-        headwidth=3,
-        headlength=4,
-        width=0.002,
-    )
-    # Parameters for quiver:
-    # angles='xy': Arrow GCs are `(x,y)` to `(x+u, y+v)`.
-    # scale_units='xy': `u,v` are in data units. `scale` is number of data units per arrow length unit.
-    # A scale of 1 means an arrow representing a displacement of (say) 10 pixels will be 10 pixels long on the plot.
-    # You might need to adjust 'scale', 'headwidth', 'headlength', 'width' for best visual appearance.
+        self.ax.imshow(base_rgb_frame)
+        self.ax.quiver(
+            x, y, fx, fy,
+            color="red", angles="xy", scale_units="xy", scale=1,
+            headwidth=3, headlength=4, width=0.002, alpha=0.9
+        )
+        
+        frame_idx_str = self.current_flow_index
+        self.ax.set_title(f"Optical Flow between Frame {frame_idx_str} and {frame_idx_str + 1}")
+        self.ax.axis("off")
+        self.fig.suptitle(f"Video ID: {self.video_id} (Flow Field {self.current_flow_index + 1}/{len(self.flow_fields)})", fontsize=14)
+        plt.draw()
 
-    plt.title(
-        f"Optical Flow (Arrows) - Frame {frame_index_str} to {int(frame_index_str) + 1 if frame_index_str.isdigit() else ''}"
-    )
-    plt.axis("off")
-    plt.suptitle(f"Video ID: {VIDEO_ID_TO_VISUALIZE}", fontsize=14)
-    plt.tight_layout(rect=[0, 0, 1, 0.96])
-    plt.show()
+    def _next_flow(self, event):
+        if self.current_flow_index < len(self.flow_fields) - 1:
+            self.current_flow_index += 1
+            self._draw_frame_and_flow()
 
+    def _prev_flow(self, event):
+        if self.current_flow_index > 0:
+            self.current_flow_index -= 1
+            self._draw_frame_and_flow()
 
 # ========================================
 # MAIN VISUALIZATION SCRIPT
 # ========================================
-def main_visualize_video_flow_arrows(video_id, video_dir):
+def main_interactive_flow_visualization(video_id, video_dir, quiver_step):
     video_filename = f"{video_id}.mp4"
     video_path = os.path.join(video_dir, video_filename)
 
@@ -140,33 +154,41 @@ def main_visualize_video_flow_arrows(video_id, video_dir):
 
     print(f"Processing video: {video_path}")
     rgb_frames = extract_rgb_frames(video_path)
+    
     if rgb_frames.shape[0] < 2:
-        print("Not enough RGB frames for optical flow.")
+        print("Not enough RGB frames extracted for optical flow.")
+        # Show a message if trying to plot with insufficient frames
+        fig, ax = plt.subplots()
+        ax.text(0.5, 0.5, f"Video {video_id} has < 2 frames.\nCannot compute optical flow.", 
+                horizontalalignment='center', verticalalignment='center')
+        ax.axis('off')
+        plt.show()
         return
     print(f"Extracted {rgb_frames.shape[0]} RGB frames.")
 
     optical_flow_fields = calculate_optical_flow(rgb_frames)
-    if optical_flow_fields.shape[0] == 0:
+    
+    if optical_flow_fields is None or optical_flow_fields.shape[0] == 0:
         print("No optical flow fields generated.")
+        fig, ax = plt.subplots()
+        ax.text(0.5, 0.5, f"Could not generate optical flow for Video {video_id}.", 
+                horizontalalignment='center', verticalalignment='center')
+        ax.axis('off')
+        plt.show()
         return
     print(f"Calculated {optical_flow_fields.shape[0]} optical flow fields.")
 
-    num_to_show = min(NUM_FLOW_FIELDS_TO_DISPLAY, optical_flow_fields.shape[0])
-    if num_to_show == 0:
-        print("Nothing to display.")
-        return
-
-    print(f"Displaying the first {num_to_show} optical flow field(s) with arrows...")
-    for i in range(num_to_show):
-        base_rgb_frame = rgb_frames[i]  # The first frame of the pair
-        flow_field_to_show = optical_flow_fields[i]
-        visualize_optical_flow_arrows(
-            base_rgb_frame, flow_field_to_show, frame_index_str=str(i), step=10
-        )  # Adjust step for density
+    # Instantiate the navigator
+    navigator = OpticalFlowNavigator(rgb_frames, optical_flow_fields, video_id, quiver_step)
+    
+    if navigator.fig: # Check if the figure was created in the navigator
+        plt.show()
+    else:
+        print("Could not initialize OpticalFlowNavigator.")
 
 
 if __name__ == "__main__":
     if not VIDEO_ID_TO_VISUALIZE:
         print("Please set the VIDEO_ID_TO_VISUALIZE variable in the script.")
     else:
-        main_visualize_video_flow_arrows(VIDEO_ID_TO_VISUALIZE, VIDEO_SET_DIRECTORY)
+        main_interactive_flow_visualization(VIDEO_ID_TO_VISUALIZE, VIDEO_SET_DIRECTORY, QUIVER_STEP)
