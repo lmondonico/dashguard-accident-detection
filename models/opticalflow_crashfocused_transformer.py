@@ -22,25 +22,19 @@ from module_hierarchical_transformer import HierarchicalTransformer
 from utils.data_loader import create_data_loaders
 
 
-# Configuration
 class Config:
-    # Data paths
     DATASET_PERCENTAGE = 1.0
 
-    # Frame extraction parameters
     NUM_FRAMES = 32
     FRAME_SIZE = (299, 299)
 
-    # Temporal sampling parameters (for RGB branch)
-    CRASH_FOCUS_RATIO = 0.7  # 70% of frames around crash time
-    TIME_WINDOW_SECONDS = 5.0  # Focus window around crash time
+    CRASH_FOCUS_RATIO = 0.7
+    TIME_WINDOW_SECONDS = 5.0
 
-    # Feature dimensions
     RGB_FEAT_DIM = 2048
     FLOW_FEAT_DIM = 2048
-    COMBINED_FEAT_DIM = RGB_FEAT_DIM + FLOW_FEAT_DIM  # 4096
+    COMBINED_FEAT_DIM = RGB_FEAT_DIM + FLOW_FEAT_DIM
 
-    # Model architecture
     INPUT_DIM = COMBINED_FEAT_DIM
     D_MODEL = 512
     NUM_HEADS = 8
@@ -49,38 +43,31 @@ class Config:
     MAX_SEQ_LEN = 32
     DROPOUT = 0.3
 
-    # Training parameters
-    BATCH_SIZE = 16  # Reduced due to larger feature dimension
+    BATCH_SIZE = 16
     NUM_EPOCHS = 40
     LEARNING_RATE = 1e-6
     WEIGHT_DECAY = 1e-3
     TEST_SIZE = 0.2
     RANDOM_STATE = 42
 
-    # OneCycleLR parameters
     MAX_LR = 1e-6
     PCT_START = 0.3
     DIV_FACTOR = 25
     FINAL_DIV_FACTOR = 1e3
 
-    # Logging
     PRINT_FREQUENCY = 10
 
-    # Directory structure
-    RESULTS_DIR = "results"
+    RESULTS_DIR = "results/opticalflow_crashfocused_transformer"
     WEIGHTS_DIR = os.path.join(RESULTS_DIR, "weights")
 
-    # Intermediate directories (post-video-split, pre-V3)
     INTERMEDIATE_FRAMES_DIR = "features/intermediate_post_split"
     UNIFORM_FRAMES_DIR = os.path.join(INTERMEDIATE_FRAMES_DIR, "uniform_flow_frames")
     TEMPORAL_FRAMES_DIR = os.path.join(INTERMEDIATE_FRAMES_DIR, "crash_rgb_frames")
 
-    # Feature directories (post-V3)
     FLOW_FEATURES_DIR = "features/optical_flow"
     TEMPORAL_RGB_FEATURES_DIR = "features/crash_rgb"
 
     def __init__(self):
-        # Create directories
         for directory in [
             self.RESULTS_DIR,
             self.WEIGHTS_DIR,
@@ -92,12 +79,10 @@ class Config:
         ]:
             os.makedirs(directory, exist_ok=True)
 
-    # Output paths
     @property
     def percentage_str(self):
         return str(int(self.DATASET_PERCENTAGE * 100))
 
-    # Flow feature files (post-V3)
     @property
     def TRAIN_FLOW_FEATURES_FILE(self):
         return os.path.join(
@@ -111,7 +96,6 @@ class Config:
             self.FLOW_FEATURES_DIR, "X_test_flow_sequences_31frames.npy"
         )
 
-    # Temporal RGB feature files (post-V3)
     @property
     def TRAIN_RGB_FEATURES_FILE(self):
         return os.path.join(
@@ -146,7 +130,6 @@ class Config:
 
 
 def extract_uniform_frames(video_path, num_frames=32, frame_size=(299, 299)):
-    """Extract uniformly spaced frames from video."""
     cap = cv2.VideoCapture(video_path)
     total_video_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
 
@@ -154,7 +137,6 @@ def extract_uniform_frames(video_path, num_frames=32, frame_size=(299, 299)):
         cap.release()
         return np.empty((0, *frame_size, 3), dtype=np.uint8)
 
-    # Uniform sampling
     frame_positions = np.linspace(0, total_video_frames - 1, num_frames, dtype=int)
 
     frames_list = []
@@ -167,10 +149,9 @@ def extract_uniform_frames(video_path, num_frames=32, frame_size=(299, 299)):
 
     cap.release()
 
-    # Pad if necessary
     while len(frames_list) < num_frames:
         if frames_list:
-            frames_list.append(frames_list[-1])  # Repeat last frame
+            frames_list.append(frames_list[-1])
         else:
             frames_list.append(np.zeros((*frame_size, 3), dtype=np.uint8))
 
@@ -185,7 +166,6 @@ def extract_crash_frames(
     time_window=5.0,
     frame_size=(299, 299),
 ):
-    """Extract frames with higher density around crash time."""
     cap = cv2.VideoCapture(video_path)
     total_video_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
     fps = cap.get(cv2.CAP_PROP_FPS)
@@ -195,36 +175,28 @@ def extract_crash_frames(
         cap.release()
         return np.empty((0, *frame_size, 3), dtype=np.uint8)
 
-    # Handle NaN crash times - fall back to uniform sampling
     if pd.isna(crash_time) or crash_time < 0:
         frame_positions = np.linspace(0, total_video_frames - 1, num_frames, dtype=int)
     else:
-        # Calculate frame positions with crash time focus
         crash_frame = int(crash_time * fps)
         crash_frame = max(0, min(crash_frame, total_video_frames - 1))
 
-        # Frames around crash time
         crash_frames_count = int(num_frames * crash_focus_ratio)
         context_frames_count = num_frames - crash_frames_count
 
-        # Window around crash time
         window_frames = int(time_window * fps)
         start_crash_window = max(0, crash_frame - window_frames // 2)
         end_crash_window = min(total_video_frames, crash_frame + window_frames // 2)
 
-        # Generate frame positions
         frame_positions = []
 
-        # High-density frames around crash
         if end_crash_window > start_crash_window:
             crash_positions = np.linspace(
                 start_crash_window, end_crash_window, crash_frames_count, dtype=int
             )
             frame_positions.extend(crash_positions)
 
-        # Context frames from rest of video
         if context_frames_count > 0:
-            # Before crash window
             before_frames = context_frames_count // 2
             if start_crash_window > 0:
                 before_positions = np.linspace(
@@ -232,7 +204,6 @@ def extract_crash_frames(
                 )[:-1]
                 frame_positions.extend(before_positions)
 
-            # After crash window
             after_frames = context_frames_count - before_frames
             if end_crash_window < total_video_frames:
                 after_positions = np.linspace(
@@ -243,10 +214,8 @@ def extract_crash_frames(
                 )[1:]
                 frame_positions.extend(after_positions)
 
-        # Sort positions and ensure uniqueness
         frame_positions = sorted(list(set(frame_positions)))
 
-    # Extract frames
     frames_list = []
     for pos in frame_positions[:num_frames]:
         cap.set(cv2.CAP_PROP_POS_FRAMES, pos)
@@ -257,7 +226,6 @@ def extract_crash_frames(
 
     cap.release()
 
-    # Pad if necessary
     while len(frames_list) < num_frames:
         if frames_list:
             frames_list.append(frames_list[-1])
@@ -268,7 +236,6 @@ def extract_crash_frames(
 
 
 def calculate_optical_flow(frames_sequence):
-    """Calculate dense optical flow between consecutive frames."""
     flow_sequence = []
     if len(frames_sequence) < 2:
         return np.empty((0, *frames_sequence.shape[1:3], 2), dtype=np.float32)
@@ -300,7 +267,6 @@ def calculate_optical_flow(frames_sequence):
 
 
 def normalize_flow_for_cnn(flow_field):
-    """Normalize optical flow for CNN input."""
     dx = flow_field[..., 0]
     dy = flow_field[..., 1]
 
@@ -326,7 +292,6 @@ class MultimodalFeatureExtractor:
             else "cpu"
         )
 
-        # Load InceptionV3 model
         self.feature_extractor = models.inception_v3(
             weights=Inception_V3_Weights.IMAGENET1K_V1
         )
@@ -334,7 +299,6 @@ class MultimodalFeatureExtractor:
         self.feature_extractor = self.feature_extractor.to(self.device)
         self.feature_extractor.eval()
 
-        # Preprocessing
         self.preprocess = transforms.Compose(
             [
                 transforms.ToPILImage(),
@@ -349,14 +313,13 @@ class MultimodalFeatureExtractor:
     def extract_and_save_frames(
         self, video_ids, video_folder, crash_times, branch_name, frames_dir
     ):
-        """Extract and save frames for a specific branch."""
         for i, video_id in enumerate(
             tqdm(video_ids, desc=f"Extracting {branch_name} frames")
         ):
             frames_file = os.path.join(frames_dir, f"{video_id}_frames.npy")
 
             if os.path.exists(frames_file):
-                continue  # Skip if already exists
+                continue
 
             video_path = os.path.join(video_folder, f"{video_id}.mp4")
 
@@ -378,7 +341,6 @@ class MultimodalFeatureExtractor:
             np.save(frames_file, frames)
 
     def process_flow_branch_to_features(self, video_ids, frames_dir, output_file):
-        """Process optical flow branch and save features."""
         if os.path.exists(output_file):
             print(f"Loading existing flow features from {output_file}")
             return np.load(output_file)
@@ -390,7 +352,6 @@ class MultimodalFeatureExtractor:
             frames_file = os.path.join(frames_dir, f"{video_id}_frames.npy")
 
             if not os.path.exists(frames_file):
-                # Create zero features if frames not found
                 flow_features_list.append(
                     np.zeros(
                         (self.config.NUM_FRAMES - 1, self.config.FLOW_FEAT_DIM),
@@ -410,7 +371,6 @@ class MultimodalFeatureExtractor:
                 )
                 continue
 
-            # Calculate optical flow
             flow_sequence = calculate_optical_flow(frames)
 
             if flow_sequence.shape[0] == 0:
@@ -422,7 +382,6 @@ class MultimodalFeatureExtractor:
                 )
                 continue
 
-            # Extract CNN features from flow
             batch_inputs = []
             for flow_field in flow_sequence:
                 flow_img = normalize_flow_for_cnn(flow_field)
@@ -434,7 +393,6 @@ class MultimodalFeatureExtractor:
                 with torch.no_grad():
                     features = self.feature_extractor(batch_tensor).cpu().numpy()
 
-                # Pad or truncate to match expected length (31 frames for flow)
                 target_length = self.config.NUM_FRAMES - 1
                 if features.shape[0] < target_length:
                     padding = np.zeros(
@@ -460,7 +418,6 @@ class MultimodalFeatureExtractor:
         return flow_features
 
     def process_rgb_branch_to_features(self, video_ids, frames_dir, output_file):
-        """Process RGB branch and save features."""
         if os.path.exists(output_file):
             print(f"Loading existing RGB features from {output_file}")
             return np.load(output_file)
@@ -491,7 +448,6 @@ class MultimodalFeatureExtractor:
                 )
                 continue
 
-            # Extract CNN features from RGB frames
             batch_inputs = []
             for frame in frames:
                 processed_frame = self.preprocess(frame)
@@ -502,7 +458,6 @@ class MultimodalFeatureExtractor:
                 with torch.no_grad():
                     features = self.feature_extractor(batch_tensor).cpu().numpy()
 
-                # Pad or truncate to match expected length (32 frames for RGB)
                 if features.shape[0] < self.config.NUM_FRAMES:
                     padding = np.zeros(
                         (
@@ -531,8 +486,6 @@ class MultimodalFeatureExtractor:
 
 
 def load_multimodal_features(config):
-    """Load or generate multimodal features."""
-    # Check if both branch features exist
     train_flow_exists = os.path.exists(config.TRAIN_FLOW_FEATURES_FILE)
     test_flow_exists = os.path.exists(config.TEST_FLOW_FEATURES_FILE)
     train_rgb_exists = os.path.exists(config.TRAIN_RGB_FEATURES_FILE)
@@ -545,7 +498,6 @@ def load_multimodal_features(config):
         X_train_rgb = np.load(config.TRAIN_RGB_FEATURES_FILE)
         X_test_rgb = np.load(config.TEST_RGB_FEATURES_FILE)
 
-        # Load labels
         data_base_path = os.path.expanduser("./data-nexar/")
         df = pd.read_csv(os.path.join(data_base_path, "train.csv"))
         df["id"] = df["id"].astype(str).str.zfill(5)
@@ -557,7 +509,6 @@ def load_multimodal_features(config):
 
         y_train = df["target"].values
 
-        # Combine features in memory (don't save combined)
         train_flow_padded = np.pad(
             X_train_flow, ((0, 0), (1, 0), (0, 0)), mode="constant", constant_values=0
         )
@@ -571,7 +522,6 @@ def load_multimodal_features(config):
 
     print("Generating branch-specific features...")
 
-    # Load data
     data_base_path = os.path.expanduser("./data-nexar/")
     df = pd.read_csv(os.path.join(data_base_path, "train.csv"))
     df_test = pd.read_csv(os.path.join(data_base_path, "test.csv"))
@@ -586,10 +536,8 @@ def load_multimodal_features(config):
     train_dir = os.path.join(data_base_path, "train/")
     test_dir = os.path.join(data_base_path, "test/")
 
-    # Initialize feature extractor
     extractor = MultimodalFeatureExtractor(config)
 
-    # Extract and save frames for both branches (intermediate post-split files)
     print("Extracting training frames...")
     extractor.extract_and_save_frames(
         df["id"],
@@ -614,7 +562,6 @@ def load_multimodal_features(config):
         df_test["id"], test_dir, None, "crash_rgb", config.TEMPORAL_FRAMES_DIR
     )
 
-    # Process both branches to features (post-V3)
     print("Processing training features...")
     X_train_flow = extractor.process_flow_branch_to_features(
         df["id"], config.UNIFORM_FRAMES_DIR, config.TRAIN_FLOW_FEATURES_FILE
@@ -631,7 +578,6 @@ def load_multimodal_features(config):
         df_test["id"], config.TEMPORAL_FRAMES_DIR, config.TEST_RGB_FEATURES_FILE
     )
 
-    # Combine features in memory (don't save combined)
     print("Combining features in memory...")
     train_flow_padded = np.pad(
         X_train_flow, ((0, 0), (1, 0), (0, 0)), mode="constant", constant_values=0
@@ -660,7 +606,6 @@ class LivePlotter:
         self.val_aucs = []
         self.learning_rates = []
 
-        # Set up axes
         self.axes[0].set_title("Loss Curves")
         self.axes[0].set_xlabel("Epoch")
         self.axes[0].set_ylabel("Loss")
@@ -673,7 +618,6 @@ class LivePlotter:
         self.axes[2].set_xlabel("Epoch")
         self.axes[2].set_ylabel("Learning Rate")
 
-        # Initialize lines
         (self.train_loss_line,) = self.axes[0].plot([], [], "b-", label="Train")
         (self.val_loss_line,) = self.axes[0].plot([], [], "r-", label="Val")
         self.axes[0].legend(frameon=False)
@@ -695,18 +639,15 @@ class LivePlotter:
 
         epochs = list(range(1, len(self.train_losses) + 1))
 
-        # Update loss curves
         self.train_loss_line.set_data(epochs, self.train_losses)
         self.val_loss_line.set_data(epochs, self.val_losses)
         self.axes[0].relim()
         self.axes[0].autoscale_view()
 
-        # Update AUC curve
         self.val_auc_line.set_data(epochs, self.val_aucs)
         self.axes[1].relim()
         self.axes[1].autoscale_view()
 
-        # Update learning rate curve
         self.lr_line.set_data(epochs, self.learning_rates)
         self.axes[2].relim()
         self.axes[2].autoscale_view()
@@ -771,7 +712,6 @@ def validate(model, val_loader, criterion, device):
 def main():
     config = Config()
 
-    # Set device
     device = torch.device(
         "cuda"
         if torch.cuda.is_available()
@@ -781,11 +721,9 @@ def main():
     )
     print(f"Using device: {device}")
 
-    # Load multimodal features
     print("Loading multimodal data...")
     X_train, X_test, y_train = load_multimodal_features(config)
 
-    # Scale features
     print("Scaling features...")
     num_train_videos, num_frames_per_video, num_features = X_train.shape
     X_train_reshaped = X_train.reshape(-1, num_features)
@@ -803,7 +741,6 @@ def main():
         num_test_videos, num_frames_per_video, num_features
     )
 
-    # Create data loaders
     print("Creating data loaders...")
     train_loader, val_loader, test_loader = create_data_loaders(
         X_train_scaled,
@@ -814,7 +751,6 @@ def main():
         random_state=config.RANDOM_STATE,
     )
 
-    # Initialize model
     print("Initializing multimodal transformer...")
     model = HierarchicalTransformer(
         input_dim=config.INPUT_DIM,
@@ -828,13 +764,11 @@ def main():
 
     print(f"Model parameters: {sum(p.numel() for p in model.parameters()):,}")
 
-    # Loss function and optimizer
     criterion = nn.BCELoss()
     optimizer = optim.AdamW(
         model.parameters(), lr=config.LEARNING_RATE, weight_decay=config.WEIGHT_DECAY
     )
 
-    # OneCycleLR scheduler
     steps_per_epoch = len(train_loader)
     total_steps = config.NUM_EPOCHS * steps_per_epoch
 
@@ -848,28 +782,22 @@ def main():
         anneal_strategy="cos",
     )
 
-    # Initialize live plotter
     live_plotter = LivePlotter()
 
-    # Training loop
     print("Starting multimodal transformer training...")
     best_auc = 0.0
 
     try:
         for epoch in range(config.NUM_EPOCHS):
-            # Training
             train_loss = train_epoch(
                 model, train_loader, criterion, optimizer, scheduler, device
             )
 
-            # Validation
             val_loss, val_auc = validate(model, val_loader, criterion, device)
             current_lr = optimizer.param_groups[0]["lr"]
 
-            # Update live plot
             live_plotter.update(train_loss, val_loss, val_auc, current_lr)
 
-            # Save best model
             if val_auc > best_auc:
                 best_auc = val_auc
                 torch.save(
@@ -893,7 +821,6 @@ def main():
                     f"Epoch {epoch + 1}: New best model saved with Val AUC: {val_auc:.4f}"
                 )
 
-            # Print progress
             if (epoch + 1) % config.PRINT_FREQUENCY == 0:
                 print(
                     f"Epoch {epoch + 1}/{config.NUM_EPOCHS} | "
@@ -910,16 +837,13 @@ def main():
         live_plotter.save_final_plot(config.PLOT_FILENAME)
         live_plotter.close()
 
-    # Load best model for final evaluation
     print(f"Loading best model from {config.MODEL_SAVE_PATH}")
     checkpoint = torch.load(config.MODEL_SAVE_PATH, weights_only=False)
     model.load_state_dict(checkpoint["model_state_dict"])
 
-    # Final validation
     _, final_auc = validate(model, val_loader, criterion, device)
     print(f"\nFinal Validation ROC-AUC: {final_auc:.4f}")
 
-    # Test set inference
     print("Generating test predictions...")
     model.eval()
     test_predictions = []
@@ -930,7 +854,6 @@ def main():
             outputs = model(features)
             test_predictions.extend(outputs.cpu().numpy().flatten())
 
-    # Create submission file
     data_base_path = os.path.expanduser("./data-nexar/")
     df_test = pd.read_csv(os.path.join(data_base_path, "test.csv"))
     df_test["id"] = df_test["id"].astype(str).str.zfill(5)
@@ -939,7 +862,6 @@ def main():
     submission.to_csv(config.SUBMISSION_FILENAME, index=False)
     print(f"Submission saved to {config.SUBMISSION_FILENAME}")
 
-    # Save training summary
     summary_file = os.path.join(
         config.RESULTS_DIR, f"training_summary_{config.percentage_str}pct.txt"
     )

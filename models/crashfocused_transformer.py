@@ -21,28 +21,23 @@ from module_hierarchical_transformer import HierarchicalTransformer
 from utils.data_loader import create_data_loaders
 
 
-# Configuration
 class Config:
-    # Data paths
     FEATURES_DIR = "features/temporal/"
     DATASET_PERCENTAGE = 1.0
 
-    # Temporal sampling parameters
-    NUM_FRAMES = 16
+    NUM_FRAMES = 32
     FRAME_SIZE = (299, 299)
-    CRASH_FOCUS_RATIO = 0.7  # 70% of frames around crash time
-    TIME_WINDOW_SECONDS = 5.0  # Focus window around crash time
+    CRASH_FOCUS_RATIO = 0.7
+    TIME_WINDOW_SECONDS = 5.0
 
-    # Model architecture
     INPUT_DIM = 2048
     D_MODEL = 512
     NUM_HEADS = 8
     NUM_LAYERS = 2
     D_FF = 512
-    MAX_SEQ_LEN = 16
+    MAX_SEQ_LEN = 32
     DROPOUT = 0.3
 
-    # Training parameters
     BATCH_SIZE = 32
     NUM_EPOCHS = 40
     LEARNING_RATE = 1e-6
@@ -50,124 +45,195 @@ class Config:
     TEST_SIZE = 0.2
     RANDOM_STATE = 42
 
-    # OneCycleLR parameters
     MAX_LR = 1e-6
     PCT_START = 0.3
     DIV_FACTOR = 25
     FINAL_DIV_FACTOR = 1e3
 
-    # Logging
     PRINT_FREQUENCY = 10
 
-    # Output paths
+    RESULTS_DIR = "results/crashfocused_transformer"
+    WEIGHTS_DIR = os.path.join(RESULTS_DIR, "weights")
+
+    INTERMEDIATE_FRAMES_DIR = "features/intermediate_post_split"
+    CRASH_RGB_FRAMES_DIR = os.path.join(INTERMEDIATE_FRAMES_DIR, "crash_rgb_frames")
+
+    def __init__(self):
+        for directory in [
+            self.RESULTS_DIR,
+            self.WEIGHTS_DIR,
+            self.FEATURES_DIR,
+            self.INTERMEDIATE_FRAMES_DIR,
+            self.CRASH_RGB_FRAMES_DIR,
+        ]:
+            os.makedirs(directory, exist_ok=True)
+
+    @property
+    def percentage_str(self):
+        return str(int(self.DATASET_PERCENTAGE * 100))
+
     @property
     def MODEL_SAVE_PATH(self):
-        return f"best_temporal_transformer_{int(self.DATASET_PERCENTAGE * 100)}pct.pth"
+        return os.path.join(
+            self.WEIGHTS_DIR,
+            f"best_temporal_transformer_{self.percentage_str}pct_N{self.NUM_FRAMES}.pth",
+        )
 
     @property
     def PLOT_FILENAME(self):
-        return f"training_curves_temporal_{int(self.DATASET_PERCENTAGE * 100)}pct.png"
+        return os.path.join(
+            self.RESULTS_DIR,
+            f"training_curves_temporal_{self.percentage_str}pct_N{self.NUM_FRAMES}.png",
+        )
 
     @property
     def SUBMISSION_FILENAME(self):
-        return f"submission_temporal_{int(self.DATASET_PERCENTAGE * 100)}pct.csv"
+        return os.path.join(
+            self.RESULTS_DIR,
+            f"submission_temporal_{self.percentage_str}pct_N{self.NUM_FRAMES}.csv",
+        )
 
 
 def extract_temporal_frames(
     video_path,
     crash_time,
-    num_frames=16,
-    crash_focus_ratio=0.7,
-    time_window=5.0,
-    frame_size=(299, 299),
+    num_frames,
+    crash_focus_ratio,
+    time_window,
+    frame_size,
 ):
-    """
-    Extract frames with higher density around crash time.
-
-    Args:
-        video_path: Path to video file
-        crash_time: Time of crash event in seconds (can be NaN)
-        num_frames: Total number of frames to extract
-        crash_focus_ratio: Fraction of frames to concentrate around crash time
-        time_window: Time window (seconds) around crash to focus on
-        frame_size: Output frame size
-    """
     cap = cv2.VideoCapture(video_path)
+    if not cap.isOpened():
+        print(f"Warning: Could not open video {video_path}")
+        return np.array([np.zeros((*frame_size, 3), dtype=np.uint8)] * num_frames)
+
     total_video_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
     fps = cap.get(cv2.CAP_PROP_FPS)
-    duration = total_video_frames / fps if fps > 0 else 10.0
 
     if total_video_frames <= 0:
+        print(f"Warning: Video {video_path} has no frames or invalid metadata.")
         cap.release()
-        return np.empty((0, *frame_size, 3), dtype=np.uint8)
+        return np.array([np.zeros((*frame_size, 3), dtype=np.uint8)] * num_frames)
 
-    # Handle NaN crash times - fall back to uniform sampling
-    if pd.isna(crash_time) or crash_time < 0:
-        # Use uniform sampling when crash time is unknown
+    if pd.isna(crash_time) or crash_time < 0 or fps == 0 or fps is None:
         frame_positions = np.linspace(0, total_video_frames - 1, num_frames, dtype=int)
     else:
-        # Calculate frame positions with crash time focus
         crash_frame = int(crash_time * fps)
         crash_frame = max(0, min(crash_frame, total_video_frames - 1))
 
-        # Frames around crash time
         crash_frames_count = int(num_frames * crash_focus_ratio)
         context_frames_count = num_frames - crash_frames_count
 
-        # Window around crash time
         window_frames = int(time_window * fps)
         start_crash_window = max(0, crash_frame - window_frames // 2)
-        end_crash_window = min(total_video_frames, crash_frame + window_frames // 2)
+        end_crash_window = min(total_video_frames - 1, crash_frame + window_frames // 2)
 
-        # Generate frame positions
         frame_positions = []
 
-        # High-density frames around crash
-        if end_crash_window > start_crash_window:
+        if end_crash_window >= start_crash_window and crash_frames_count > 0:
             crash_positions = np.linspace(
-                start_crash_window, end_crash_window, crash_frames_count, dtype=int
+                start_crash_window,
+                end_crash_window,
+                crash_frames_count,
+                dtype=int,
+                endpoint=True,
             )
             frame_positions.extend(crash_positions)
 
-        # Context frames from rest of video
         if context_frames_count > 0:
-            # Before crash window
-            before_frames = context_frames_count // 2
+            remaining_video_indices = list(
+                set(range(total_video_frames)) - set(frame_positions)
+            )
+
+            context_candidate_indices = []
             if start_crash_window > 0:
-                before_positions = np.linspace(
-                    0, start_crash_window, before_frames + 1, dtype=int
-                )[:-1]
-                frame_positions.extend(before_positions)
+                context_candidate_indices.extend(range(0, start_crash_window))
+            if end_crash_window < total_video_frames - 1:
+                context_candidate_indices.extend(
+                    range(end_crash_window + 1, total_video_frames)
+                )
 
-            # After crash window
-            after_frames = context_frames_count - before_frames
-            if end_crash_window < total_video_frames:
-                after_positions = np.linspace(
-                    end_crash_window,
-                    total_video_frames - 1,
-                    after_frames + 1,
-                    dtype=int,
-                )[1:]
-                frame_positions.extend(after_positions)
+            if len(context_candidate_indices) < context_frames_count:
+                other_remaining = list(
+                    set(remaining_video_indices) - set(context_candidate_indices)
+                )
+                np.random.shuffle(other_remaining)
+                context_candidate_indices.extend(other_remaining)
+            else:
+                np.random.shuffle(context_candidate_indices)
 
-        # Sort positions and ensure uniqueness
-        frame_positions = sorted(list(set(frame_positions)))
+            selected_context_frames = np.sort(
+                np.array(context_candidate_indices[:context_frames_count], dtype=int)
+            )
+            frame_positions.extend(selected_context_frames)
 
-    # Extract frames
+        frame_positions = sorted(
+            list(set(int(p) for p in frame_positions if 0 <= p < total_video_frames))
+        )
+
+    if len(frame_positions) < num_frames:
+        if (
+            len(frame_positions) == 0
+        ):  # No valid frames could be sampled, use linspace over whole video
+            frame_positions = np.linspace(
+                0, total_video_frames - 1, num_frames, dtype=int
+            ).tolist()
+        else:  # Pad with existing frames or linspace
+            additional_frames_needed = num_frames - len(frame_positions)
+            # Try to fill by repeating last sampled frames, then resort to linspace if needed
+            fill_positions = (
+                np.random.choice(frame_positions, additional_frames_needed).tolist()
+                if frame_positions
+                else []
+            )
+            if len(fill_positions) < additional_frames_needed:
+                fill_positions.extend(
+                    np.linspace(
+                        0,
+                        total_video_frames - 1,
+                        additional_frames_needed - len(fill_positions),
+                        dtype=int,
+                    ).tolist()
+                )
+            frame_positions.extend(fill_positions)
+            frame_positions = sorted(list(set(frame_positions)))
+
+    frame_positions = frame_positions[:num_frames]
+    frame_positions = [
+        min(max(0, int(p)), total_video_frames - 1) for p in frame_positions
+    ]
+
     frames_list = []
-    for pos in frame_positions[:num_frames]:  # Ensure we don't exceed num_frames
+    current_positions_len = len(frame_positions)
+    if current_positions_len < num_frames:
+        if current_positions_len > 0:
+            frame_positions.extend(
+                [frame_positions[-1]] * (num_frames - current_positions_len)
+            )
+        elif total_video_frames > 0:
+            frame_positions.extend(
+                [total_video_frames - 1] * (num_frames - current_positions_len)
+            )
+        else:
+            frame_positions.extend([0] * (num_frames - current_positions_len))
+
+    for pos in frame_positions:
         cap.set(cv2.CAP_PROP_POS_FRAMES, pos)
         ret, frame = cap.read()
         if ret:
             frame = cv2.resize(frame, frame_size)
             frames_list.append(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
+        else:
+            if frames_list:
+                frames_list.append(frames_list[-1].copy())
+            else:
+                frames_list.append(np.zeros((*frame_size, 3), dtype=np.uint8))
 
     cap.release()
 
-    # Pad if necessary
     while len(frames_list) < num_frames:
         if frames_list:
-            frames_list.append(frames_list[-1])  # Repeat last frame
+            frames_list.append(frames_list[-1].copy())
         else:
             frames_list.append(np.zeros((*frame_size, 3), dtype=np.uint8))
 
@@ -175,41 +241,46 @@ def extract_temporal_frames(
 
 
 def load_temporal_features():
-    """Load or generate temporal-aware features."""
     config = Config()
 
-    # Create features directory
-    os.makedirs(config.FEATURES_DIR, exist_ok=True)
-
-    percentage_str = str(int(config.DATASET_PERCENTAGE * 100))
-    train_features_file = os.path.join(
-        config.FEATURES_DIR, f"X_train_temporal_{percentage_str}pct.npy"
+    train_cnn_features_file = os.path.join(
+        config.FEATURES_DIR,
+        f"X_train_temporal_{config.percentage_str}pct_N{config.NUM_FRAMES}.npy",
     )
-    test_features_file = os.path.join(config.FEATURES_DIR, "X_test_temporal.npy")
+    test_cnn_features_file = os.path.join(
+        config.FEATURES_DIR, f"X_test_temporal_N{config.NUM_FRAMES}.npy"
+    )
 
-    # Load data
     data_base_path = os.path.expanduser("./data-nexar/")
-    df = pd.read_csv(os.path.join(data_base_path, "train.csv"))
-    df_test = pd.read_csv(os.path.join(data_base_path, "test.csv"))
-    df["id"] = df["id"].astype(str).str.zfill(5)
-    df_test["id"] = df_test["id"].astype(str).str.zfill(5)
+    df_train_full = pd.read_csv(os.path.join(data_base_path, "train.csv"))
+    df_train_full["id"] = df_train_full["id"].astype(str).str.zfill(5)
 
     if config.DATASET_PERCENTAGE < 1.0:
-        df = df.sample(
+        df = df_train_full.sample(
             frac=config.DATASET_PERCENTAGE, random_state=config.RANDOM_STATE
         ).reset_index(drop=True)
+    else:
+        df = df_train_full.copy()
+    y_train = df["target"].values
 
+    if os.path.exists(train_cnn_features_file) and os.path.exists(
+        test_cnn_features_file
+    ):
+        print(
+            f"Loading pre-computed temporal CNN features from {train_cnn_features_file}"
+        )
+        X_train_sequences = np.load(train_cnn_features_file)
+        X_test_sequences = np.load(test_cnn_features_file)
+        return X_train_sequences, X_test_sequences, y_train
+
+    print(
+        "CNN features not found. Attempting to generate them using intermediate frames..."
+    )
+    df_test = pd.read_csv(os.path.join(data_base_path, "test.csv"))
+    df_test["id"] = df_test["id"].astype(str).str.zfill(5)
     train_dir = os.path.join(data_base_path, "train/")
     test_dir = os.path.join(data_base_path, "test/")
 
-    if os.path.exists(train_features_file) and os.path.exists(test_features_file):
-        print(f"Loading temporal features from {train_features_file}")
-        X_train_sequences = np.load(train_features_file)
-        X_test_sequences = np.load(test_features_file)
-        y_train = df["target"].values
-        return X_train_sequences, X_test_sequences, y_train
-
-    # Set up feature extraction
     device = torch.device(
         "cuda"
         if torch.cuda.is_available()
@@ -218,12 +289,12 @@ def load_temporal_features():
         else "cpu"
     )
 
-    base_model = models.inception_v3(weights=Inception_V3_Weights.IMAGENET1K_V1)
-    base_model.fc = nn.Identity()
-    base_model = base_model.to(device)
-    base_model.eval()
+    cnn_model = models.inception_v3(weights=Inception_V3_Weights.IMAGENET1K_V1)
+    cnn_model.fc = nn.Identity()
+    cnn_model = cnn_model.to(device)
+    cnn_model.eval()
 
-    preprocess = transforms.Compose(
+    preprocess_transform = transforms.Compose(
         [
             transforms.ToPILImage(),
             transforms.Resize(config.FRAME_SIZE),
@@ -232,72 +303,135 @@ def load_temporal_features():
         ]
     )
 
-    def extract_features_temporal(video_ids, video_folder, crash_times=None):
-        """Extract features using temporal-aware sampling."""
-        features_list = []
+    def extract_features_from_frames_or_video(
+        video_ids, video_folder, crash_rgb_frames_storage_dir, crash_times_series=None
+    ):
+        cnn_features_list = []
 
         for i, video_id in enumerate(
-            tqdm(video_ids, desc=f"Extracting temporal features from {video_folder}")
+            tqdm(
+                video_ids,
+                desc=f"Processing crash_rgb frames/videos from {video_folder} for CNN features",
+            )
         ):
+            intermediate_frames_file = os.path.join(
+                crash_rgb_frames_storage_dir, f"{video_id}_frames.npy"
+            )
             video_path = os.path.join(video_folder, f"{video_id}.mp4")
-
-            # Get crash time for this video
-            crash_time = (
-                crash_times[i] if crash_times is not None else 5.0
-            )  # Default for test
+            frames_np = None
+            current_crash_time = (
+                crash_times_series.iloc[i]
+                if crash_times_series is not None and i < len(crash_times_series)
+                else None
+            )
 
             try:
-                frames_np = extract_temporal_frames(
-                    video_path,
-                    crash_time,
-                    num_frames=config.NUM_FRAMES,
-                    crash_focus_ratio=config.CRASH_FOCUS_RATIO,
-                    time_window=config.TIME_WINDOW_SECONDS,
-                    frame_size=config.FRAME_SIZE,
-                )
+                if os.path.exists(intermediate_frames_file):
+                    frames_np = np.load(intermediate_frames_file)
+                    if frames_np.shape[0] < config.NUM_FRAMES:
+                        print(
+                            f"Padding loaded crash_rgb frames for {video_id} from {frames_np.shape[0]} to {config.NUM_FRAMES}"
+                        )
+                        padding_data = np.zeros(
+                            (
+                                config.NUM_FRAMES - frames_np.shape[0],
+                                *config.FRAME_SIZE,
+                                3,
+                            ),
+                            dtype=frames_np.dtype,
+                        )
+                        if frames_np.shape[0] > 0:
+                            padding_data = np.repeat(
+                                frames_np[-1:],
+                                config.NUM_FRAMES - frames_np.shape[0],
+                                axis=0,
+                            )
+                        frames_np = (
+                            np.vstack((frames_np, padding_data))
+                            if frames_np.shape[0] > 0
+                            else padding_data
+                        )
+                    frames_np = frames_np[: config.NUM_FRAMES]
+                else:
+                    frames_np = extract_temporal_frames(
+                        video_path,
+                        current_crash_time,
+                        num_frames=config.NUM_FRAMES,
+                        crash_focus_ratio=config.CRASH_FOCUS_RATIO,
+                        time_window=config.TIME_WINDOW_SECONDS,
+                        frame_size=config.FRAME_SIZE,
+                    )
+                    np.save(intermediate_frames_file, frames_np)
 
-                if frames_np.shape[0] == 0:
-                    features_list.append(
+                if frames_np.shape[0] == 0 or frames_np.shape[0] < config.NUM_FRAMES:
+                    print(
+                        f"Warning: Not enough crash_rgb frames for {video_id} ({frames_np.shape[0]}), using zeros."
+                    )
+                    cnn_features_list.append(
                         np.zeros(
                             (config.NUM_FRAMES, config.INPUT_DIM), dtype=np.float32
                         )
                     )
                     continue
 
-                # Process frames through CNN
-                batch_frames = []
+                batch_frames_tensors = []
                 for frame_idx in range(frames_np.shape[0]):
-                    processed_frame = preprocess(frames_np[frame_idx])
-                    batch_frames.append(processed_frame)
+                    processed_frame = preprocess_transform(frames_np[frame_idx])
+                    batch_frames_tensors.append(processed_frame)
 
-                batch_tensor = torch.stack(batch_frames).to(device)
+                batch_tensor = torch.stack(batch_frames_tensors).to(device)
 
                 with torch.no_grad():
-                    frame_features = base_model(batch_tensor)
-
-                features_list.append(frame_features.cpu().numpy())
+                    output = cnn_model(batch_tensor)
+                    frame_cnn_features = (
+                        output[0]
+                        if isinstance(output, tuple) and not cnn_model.training
+                        else output
+                    )
+                cnn_features_list.append(frame_cnn_features.cpu().numpy())
 
             except Exception as e:
-                print(f"Error processing {video_id}: {e}")
-                features_list.append(
+                print(
+                    f"Error processing {video_id} for crash_rgb: {e}. Appending zeros."
+                )
+                cnn_features_list.append(
                     np.zeros((config.NUM_FRAMES, config.INPUT_DIM), dtype=np.float32)
                 )
 
-        return np.array(features_list, dtype=np.float32)
+        processed_cnn_features_list = []
+        for features_seq in cnn_features_list:
+            if features_seq.shape[0] < config.NUM_FRAMES:
+                padding_needed = config.NUM_FRAMES - features_seq.shape[0]
+                padding_array = np.zeros(
+                    (padding_needed, config.INPUT_DIM), dtype=np.float32
+                )
+                if features_seq.shape[0] > 0:
+                    padding_array = np.repeat(features_seq[-1:], padding_needed, axis=0)
+                features_seq = (
+                    np.vstack((features_seq, padding_array))
+                    if features_seq.shape[0] > 0
+                    else padding_array
+                )
+            processed_cnn_features_list.append(features_seq[: config.NUM_FRAMES])
 
-    # Extract training features
-    print("Extracting temporal-aware training features...")
-    X_train_sequences = extract_features_temporal(
-        df["id"], train_dir, df["time_of_event"].values
+        return np.array(processed_cnn_features_list, dtype=np.float32)
+
+    print("Generating/Loading training temporal (crash_rgb) CNN features...")
+    X_train_sequences = extract_features_from_frames_or_video(
+        df["id"], train_dir, config.CRASH_RGB_FRAMES_DIR, df["time_of_event"]
     )
-    np.save(train_features_file, X_train_sequences)
+    np.save(train_cnn_features_file, X_train_sequences)
+    print(f"Saved training temporal CNN features to {train_cnn_features_file}")
 
-    # Extract test features
-    print("Extracting temporal-aware test features...")
-    X_test_sequences = extract_features_temporal(df_test["id"], test_dir)
-    np.save(test_features_file, X_test_sequences)
-
-    y_train = df["target"].values
+    print("Generating/Loading test temporal (crash_rgb) CNN features...")
+    X_test_sequences = extract_features_from_frames_or_video(
+        df_test["id"],
+        test_dir,
+        config.CRASH_RGB_FRAMES_DIR,
+        crash_times_series=None,  # No crash times for test
+    )
+    np.save(test_cnn_features_file, X_test_sequences)
+    print(f"Saved test temporal CNN features to {test_cnn_features_file}")
 
     return X_train_sequences, X_test_sequences, y_train
 
@@ -313,7 +447,6 @@ class LivePlotter:
         self.val_aucs = []
         self.learning_rates = []
 
-        # Set up axes
         self.axes[0].set_title("Loss Curves")
         self.axes[0].set_xlabel("Epoch")
         self.axes[0].set_ylabel("Loss")
@@ -326,7 +459,6 @@ class LivePlotter:
         self.axes[2].set_xlabel("Epoch")
         self.axes[2].set_ylabel("Learning Rate")
 
-        # Initialize lines
         (self.train_loss_line,) = self.axes[0].plot([], [], "b-", label="Train")
         (self.val_loss_line,) = self.axes[0].plot([], [], "r-", label="Val")
         self.axes[0].legend(frameon=False)
@@ -338,7 +470,7 @@ class LivePlotter:
         self.axes[2].legend(frameon=False)
 
         plt.tight_layout()
-        plt.show()
+        plt.show(block=False)
 
     def update(self, train_loss, val_loss, val_auc, learning_rate):
         self.train_losses.append(train_loss)
@@ -348,18 +480,15 @@ class LivePlotter:
 
         epochs = list(range(1, len(self.train_losses) + 1))
 
-        # Update loss curves
         self.train_loss_line.set_data(epochs, self.train_losses)
         self.val_loss_line.set_data(epochs, self.val_losses)
         self.axes[0].relim()
         self.axes[0].autoscale_view()
 
-        # Update AUC curve
         self.val_auc_line.set_data(epochs, self.val_aucs)
         self.axes[1].relim()
         self.axes[1].autoscale_view()
 
-        # Update learning rate curve
         self.lr_line.set_data(epochs, self.learning_rates)
         self.axes[2].relim()
         self.axes[2].autoscale_view()
@@ -383,7 +512,7 @@ def train_epoch(model, train_loader, criterion, optimizer, scheduler, device):
     total_loss = 0
 
     for features, labels in tqdm(train_loader, desc="Training"):
-        features, labels = features.to(device), labels.to(device)
+        features, labels = features.to(device), labels.to(device).float().unsqueeze(1)
 
         optimizer.zero_grad()
         outputs = model(features)
@@ -393,7 +522,8 @@ def train_epoch(model, train_loader, criterion, optimizer, scheduler, device):
         torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
 
         optimizer.step()
-        scheduler.step()
+        if scheduler:
+            scheduler.step()
         total_loss += loss.item()
 
     return total_loss / len(train_loader)
@@ -407,7 +537,10 @@ def validate(model, val_loader, criterion, device):
 
     with torch.no_grad():
         for features, labels in tqdm(val_loader, desc="Validation"):
-            features, labels = features.to(device), labels.to(device)
+            features, labels = (
+                features.to(device),
+                labels.to(device).float().unsqueeze(1),
+            )
             outputs = model(features)
             loss = criterion(outputs, labels)
 
@@ -416,15 +549,19 @@ def validate(model, val_loader, criterion, device):
             all_labels.extend(labels.cpu().numpy().flatten())
 
     avg_loss = total_loss / len(val_loader)
-    auc_score = roc_auc_score(all_labels, all_predictions)
-
+    try:
+        auc_score = roc_auc_score(all_labels, all_predictions)
+    except ValueError:
+        print(
+            "Warning: ROC AUC score could not be calculated (possibly single class in batch). Setting to 0."
+        )
+        auc_score = 0.0
     return avg_loss, auc_score
 
 
 def main():
     config = Config()
 
-    # Set device
     device = torch.device(
         "cuda"
         if torch.cuda.is_available()
@@ -434,30 +571,27 @@ def main():
     )
     print(f"Using device: {device}")
 
-    # Load temporal-aware features
-    print("Loading temporal-aware data...")
+    print("Loading temporal-aware data (crash-focused)...")
     X_train, X_test, y_train = load_temporal_features()
 
-    # Scale features
     from sklearn.preprocessing import StandardScaler
 
-    num_train_videos, num_frames_per_video, num_features = X_train.shape
-    X_train_reshaped = X_train.reshape(-1, num_features)
+    num_train_videos, num_frames_per_video, num_features_dim = X_train.shape
+    X_train_reshaped = X_train.reshape(-1, num_features_dim)
 
     scaler = StandardScaler()
     X_train_scaled_reshaped = scaler.fit_transform(X_train_reshaped)
     X_train_scaled = X_train_scaled_reshaped.reshape(
-        num_train_videos, num_frames_per_video, num_features
+        num_train_videos, num_frames_per_video, num_features_dim
     )
 
     num_test_videos = X_test.shape[0]
-    X_test_reshaped = X_test.reshape(-1, num_features)
+    X_test_reshaped = X_test.reshape(-1, num_features_dim)
     X_test_scaled_reshaped = scaler.transform(X_test_reshaped)
     X_test_scaled = X_test_scaled_reshaped.reshape(
-        num_test_videos, num_frames_per_video, num_features
+        num_test_videos, num_frames_per_video, num_features_dim
     )
 
-    # Create data loaders
     print("Creating data loaders...")
     train_loader, val_loader, test_loader = create_data_loaders(
         X_train_scaled,
@@ -468,7 +602,6 @@ def main():
         random_state=config.RANDOM_STATE,
     )
 
-    # Initialize model
     print("Initializing temporal-aware transformer...")
     model = HierarchicalTransformer(
         input_dim=config.INPUT_DIM,
@@ -482,13 +615,11 @@ def main():
 
     print(f"Model parameters: {sum(p.numel() for p in model.parameters()):,}")
 
-    # Loss function and optimizer
     criterion = nn.BCELoss()
     optimizer = optim.AdamW(
         model.parameters(), lr=config.LEARNING_RATE, weight_decay=config.WEIGHT_DECAY
     )
 
-    # OneCycleLR scheduler
     steps_per_epoch = len(train_loader)
     total_steps = config.NUM_EPOCHS * steps_per_epoch
 
@@ -502,28 +633,22 @@ def main():
         anneal_strategy="cos",
     )
 
-    # Initialize live plotter
     live_plotter = LivePlotter()
 
-    # Training loop
     print("Starting temporal-aware transformer training...")
     best_auc = 0.0
 
     try:
         for epoch in range(config.NUM_EPOCHS):
-            # Training
             train_loss = train_epoch(
                 model, train_loader, criterion, optimizer, scheduler, device
             )
 
-            # Validation
             val_loss, val_auc = validate(model, val_loader, criterion, device)
             current_lr = optimizer.param_groups[0]["lr"]
 
-            # Update live plot
             live_plotter.update(train_loss, val_loss, val_auc, current_lr)
 
-            # Save best model
             if val_auc > best_auc:
                 best_auc = val_auc
                 torch.save(
@@ -531,6 +656,16 @@ def main():
                         "model_state_dict": model.state_dict(),
                         "best_auc": float(best_auc),
                         "epoch": int(epoch),
+                        "config_params": {
+                            "input_dim": config.INPUT_DIM,
+                            "d_model": config.D_MODEL,
+                            "num_heads": config.NUM_HEADS,
+                            "num_layers": config.NUM_LAYERS,
+                            "d_ff": config.D_FF,
+                            "max_seq_len": config.MAX_SEQ_LEN,
+                            "dropout": config.DROPOUT,
+                            "num_frames": config.NUM_FRAMES,
+                        },
                     },
                     config.MODEL_SAVE_PATH,
                 )
@@ -538,8 +673,9 @@ def main():
                     f"Epoch {epoch + 1}: New best model saved with Val AUC: {val_auc:.4f}"
                 )
 
-            # Print progress
-            if (epoch + 1) % config.PRINT_FREQUENCY == 0:
+            if (
+                epoch + 1
+            ) % config.PRINT_FREQUENCY == 0 or epoch == config.NUM_EPOCHS - 1:
                 print(
                     f"Epoch {epoch + 1}/{config.NUM_EPOCHS} | "
                     f"LR: {current_lr:.1e} | "
@@ -555,39 +691,83 @@ def main():
         live_plotter.save_final_plot(config.PLOT_FILENAME)
         live_plotter.close()
 
-    # Load best model for final evaluation
-    print(f"Loading best model from {config.MODEL_SAVE_PATH}")
-    checkpoint = torch.load(config.MODEL_SAVE_PATH, weights_only=False)
-    model.load_state_dict(checkpoint["model_state_dict"])
+    final_auc = 0.0
+    if os.path.exists(config.MODEL_SAVE_PATH):
+        print(f"Loading best model from {config.MODEL_SAVE_PATH}")
+        checkpoint = torch.load(config.MODEL_SAVE_PATH, map_location=device)
+        model.load_state_dict(checkpoint["model_state_dict"])
 
-    # Final validation
-    _, final_auc = validate(model, val_loader, criterion, device)
-    print(f"\nFinal Validation ROC-AUC: {final_auc:.4f}")
+        _, final_auc = validate(model, val_loader, criterion, device)
+        print(f"\nFinal Validation ROC-AUC: {final_auc:.4f}")
 
-    # Test set inference
-    print("Generating test predictions...")
-    model.eval()
-    test_predictions = []
+        print("Generating test predictions...")
+        model.eval()
+        test_predictions = []
 
-    with torch.no_grad():
-        for features in tqdm(test_loader, desc="Test inference"):
-            features = features.to(device)
-            outputs = model(features)
-            test_predictions.extend(outputs.cpu().numpy().flatten())
+        with torch.no_grad():
+            for features_test_batch in tqdm(test_loader, desc="Test inference"):
+                features_tensor = features_test_batch[0].to(device)
+                outputs = model(features_tensor)
+                test_predictions.extend(outputs.cpu().numpy().flatten())
 
-    # Create submission file
-    data_base_path = os.path.expanduser("./data-nexar/")
-    df_test = pd.read_csv(os.path.join(data_base_path, "test.csv"))
-    df_test["id"] = df_test["id"].astype(str).str.zfill(5)
+        data_base_path = os.path.expanduser("./data-nexar/")
+        df_test_info = pd.read_csv(os.path.join(data_base_path, "test.csv"))
+        df_test_info["id"] = df_test_info["id"].astype(str).str.zfill(5)
 
-    submission = pd.DataFrame({"id": df_test["id"], "score": test_predictions})
-    submission.to_csv(config.SUBMISSION_FILENAME, index=False)
-    print(f"Submission saved to {config.SUBMISSION_FILENAME}")
+        submission = pd.DataFrame({"id": df_test_info["id"], "score": test_predictions})
+        submission.to_csv(config.SUBMISSION_FILENAME, index=False)
+        print(f"Submission saved to {config.SUBMISSION_FILENAME}")
+    else:
+        print(
+            f"No best model found at {config.MODEL_SAVE_PATH}. Skipping final evaluation and submission."
+        )
+
+    summary_file = os.path.join(
+        config.RESULTS_DIR,
+        f"training_summary_temporal_{config.percentage_str}pct_N{config.NUM_FRAMES}.txt",
+    )
+    with open(summary_file, "w") as f:
+        f.write(f"CRASH-FOCUSED (TEMPORAL) TRANSFORMER TRAINING SUMMARY\n")
+        f.write(f"=====================================================\n\n")
+        f.write(
+            f"Dataset used: {config.DATASET_PERCENTAGE * 100}% ({len(X_train) if 'X_train' in locals() else 'N/A'} samples)\n"
+        )
+        f.write(f"Input Dimension (CNN Features): {config.INPUT_DIM}\n")
+        f.write(f"Transformer d_model: {config.D_MODEL}\n")
+        f.write(f"Transformer num_layers: {config.NUM_LAYERS}\n")
+        f.write(f"Transformer num_heads: {config.NUM_HEADS}\n")
+        f.write(f"Number of frames per video: {config.NUM_FRAMES}\n")
+        f.write(f"Crash focus ratio: {config.CRASH_FOCUS_RATIO}\n")
+        f.write(f"Time window (seconds): {config.TIME_WINDOW_SECONDS}\n")
+        f.write(f"Model parameters: {sum(p.numel() for p in model.parameters()):,}\n")
+        f.write(f"Training epochs: {config.NUM_EPOCHS}\n")
+        f.write(f"Best validation AUC: {best_auc:.4f}\n")
+        f.write(f"Final validation AUC: {final_auc:.4f}\n")
+        f.write(f"Batch size: {config.BATCH_SIZE}\n")
+        f.write(f"Learning rate (initial): {config.LEARNING_RATE}\n")
+        f.write(f"Max LR (OneCycle): {config.MAX_LR}\n")
+        f.write(f"\nFile structure:\n")
+        f.write(f"  - CNN Feature directory: {config.FEATURES_DIR}\n")
+        f.write(
+            f"  - Intermediate Crash RGB Frames directory: {config.CRASH_RGB_FRAMES_DIR}\n"
+        )
+        f.write(f"  - Model weights directory: {config.WEIGHTS_DIR}\n")
+        f.write(f"  - Results directory: {config.RESULTS_DIR}\n")
+        f.write(f"  - Plot file: {config.PLOT_FILENAME}\n")
+        f.write(f"  - Submission file: {config.SUBMISSION_FILENAME}\n")
+        if os.path.exists(config.MODEL_SAVE_PATH):
+            f.write(f"  - Saved Model path: {config.MODEL_SAVE_PATH}\n")
+        else:
+            f.write(f"  - Saved Model path: Model not saved.\n")
 
     print(f"\nTEMPORAL-AWARE TRANSFORMER SUMMARY")
-    print(f"Dataset used: {config.DATASET_PERCENTAGE * 100}% ({len(X_train)} samples)")
+    print(
+        f"Dataset used: {config.DATASET_PERCENTAGE * 100}% ({len(X_train) if 'X_train' in locals() else 'N/A'} samples)"
+    )
+    print(f"Number of Frames: {config.NUM_FRAMES}")
     print(f"Best validation AUC: {best_auc:.4f}")
     print(f"Final validation AUC: {final_auc:.4f}")
+    print(f"Summary saved to {summary_file}")
 
 
 if __name__ == "__main__":
