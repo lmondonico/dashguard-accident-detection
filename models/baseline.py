@@ -1,10 +1,14 @@
+"""
+Baseline model for collision detection using InceptionV3 features.
+"""
+
 import os
 import cv2
 import numpy as np
 import pandas as pd
 from tqdm import tqdm
 import matplotlib.pyplot as plt
-from sklearn.model_selection import train_test_split
+from sklearn.model_selection import train_test_split, StratifiedKFold
 from sklearn.preprocessing import StandardScaler
 from sklearn.metrics import roc_auc_score
 import torch
@@ -21,21 +25,21 @@ FEAT_DIM = 2048
 HIDDEN_DIMS = [128]
 DROPOUT_RATE = 0.3
 BATCH_SIZE = 64
-NUM_EPOCHS = 1000
+NUM_EPOCHS = 100
 WEIGHT_DECAY = 1e-2
-TEST_SIZE = 0.35
+FINAL_TEST_SIZE = 0.1  # 10% for final test
+CV_FOLDS = 5
 RANDOM_STATE = 42
 INITIAL_LR = 1e-8
 MAX_LR = 5e-7
 FINAL_LR = 5e-9
 PCT_START = 0.2
 SAVE_METRICS_CSV = True
-PRINT_FREQUENCY = 20
-PLOT_UPDATE_FREQUENCY = 5
+PRINT_FREQUENCY = 10
 
-RESULTS_DIR = "results/baseline"
+RESULTS_DIR = "results/baseline_cv"
 WEIGHTS_DIR = os.path.join(RESULTS_DIR, "weights")
-FEATURES_ROOT_DIR = "features/baseline"
+FEATURES_ROOT_DIR = "features/baseline_cv"
 INTERMEDIATE_FRAMES_DIR = "features/intermediate_post_split"
 UNIFORM_FRAMES_DIR = os.path.join(INTERMEDIATE_FRAMES_DIR, "uniform_flow_frames")
 
@@ -50,7 +54,6 @@ for directory in [
     os.makedirs(directory, exist_ok=True)
 
 os.environ["TORCH_HOME"] = "./cache"
-plt.ion()
 
 device = torch.device(
     "cuda"
@@ -62,9 +65,7 @@ device = torch.device(
 print(f"Using device: {device}")
 
 df = pd.read_csv("./data-nexar/train.csv")
-df_test = pd.read_csv("./data-nexar/test.csv")
 df["id"] = df["id"].astype(str).str.zfill(5)
-df_test["id"] = df_test["id"].astype(str).str.zfill(5)
 
 if DATASET_PERCENTAGE < 1.0:
     print(f"Sampling {DATASET_PERCENTAGE * 100}% of the training dataset...")
@@ -74,11 +75,17 @@ if DATASET_PERCENTAGE < 1.0:
     print(f"Training set reduced to {len(df)} samples")
 
 train_dir = "./data-nexar/train/"
-test_dir = "./data-nexar/test/"
 df["train_videos"] = df["id"] + ".mp4"
-df_test["test_videos"] = df_test["id"] + ".mp4"
 print(f"Total Train Videos: {len(df['train_videos'])}")
-print(f"Total Test Videos:  {len(df_test['test_videos'])}")
+
+cv_data, final_test_data = train_test_split(
+    df, test_size=FINAL_TEST_SIZE, stratify=df["target"], random_state=RANDOM_STATE
+)
+cv_data = cv_data.reset_index(drop=True)
+final_test_data = final_test_data.reset_index(drop=True)
+
+print(f"CV data: {len(cv_data)} samples")
+print(f"Final test data: {len(final_test_data)} samples")
 
 
 def extract_frames(path, num_frames=NUM_FRAMES, size=FRAME_SIZE):
@@ -113,6 +120,7 @@ def extract_frames(path, num_frames=NUM_FRAMES, size=FRAME_SIZE):
     return np.stack(frames_list[:num_frames])
 
 
+# Load InceptionV3 model
 base_model = models.inception_v3(weights=Inception_V3_Weights.IMAGENET1K_V1)
 base_model.fc = nn.Identity()
 base_model.aux_logits = False
@@ -129,9 +137,9 @@ preprocess = transforms.Compose(
 )
 
 
-def get_features(ids, folder, uniform_frames_storage_dir):
+def get_features(ids, folder, uniform_frames_storage_dir, split_name=""):
     feats = []
-    for vid in tqdm(ids, desc=f"Extracting from {folder}"):
+    for vid in tqdm(ids, desc=f"Extracting from {folder} ({split_name})"):
         intermediate_frames_file = os.path.join(
             uniform_frames_storage_dir, f"{vid}_frames.npy"
         )
@@ -162,33 +170,61 @@ def get_features(ids, folder, uniform_frames_storage_dir):
     return np.vstack(feats)
 
 
-percentage_str = str(int(DATASET_PERCENTAGE * 100))
-X_TRAIN_FEATURES_FILE = os.path.join(
-    FEATURES_ROOT_DIR, f"X_train_full_features_{percentage_str}pct_N{NUM_FRAMES}.npy"
-)
-X_TEST_FEATURES_FILE = os.path.join(
-    FEATURES_ROOT_DIR, f"X_test_features_N{NUM_FRAMES}.npy"
-)
+def load_or_extract_features(data_split, split_name):
+    """Load features if they exist, otherwise extract them"""
+    percentage_str = str(int(DATASET_PERCENTAGE * 100))
+    features_file = os.path.join(
+        FEATURES_ROOT_DIR,
+        f"X_{split_name}_features_{percentage_str}pct_N{NUM_FRAMES}.npy",
+    )
 
-if os.path.exists(X_TRAIN_FEATURES_FILE) and os.path.exists(X_TEST_FEATURES_FILE):
-    print(f"Loading pre-computed aggregated features...")
-    X_train_full = np.load(X_TRAIN_FEATURES_FILE)
-    X_test = np.load(X_TEST_FEATURES_FILE)
-else:
-    print("Aggregated features not found. Generating...")
-    X_train_full = get_features(df["id"], train_dir, UNIFORM_FRAMES_DIR)
-    np.save(X_TRAIN_FEATURES_FILE, X_train_full)
-    print(f"Saved training aggregated features to {X_TRAIN_FEATURES_FILE}")
-    X_test = get_features(df_test["id"], test_dir, UNIFORM_FRAMES_DIR)
-    np.save(X_TEST_FEATURES_FILE, X_test)
-    print(f"Saved test aggregated features to {X_TEST_FEATURES_FILE}")
+    if os.path.exists(features_file):
+        print(f"Loading existing {split_name} features from {features_file}")
+        return np.load(features_file)
+    else:
+        print(f"Extracting {split_name} features...")
+        features = get_features(
+            data_split["id"], train_dir, UNIFORM_FRAMES_DIR, split_name
+        )
+        np.save(features_file, features)
+        print(f"Saved {split_name} features to {features_file}")
+        return features
 
-scaler = StandardScaler()
-X_scaled = scaler.fit_transform(X_train_full)
-y = df["target"].values
-X_tr, X_val, y_tr, y_val = train_test_split(
-    X_scaled, y, test_size=TEST_SIZE, stratify=y, random_state=RANDOM_STATE
-)
+
+def check_existing_models():
+    """Check if all fold models already exist"""
+    existing_models = []
+    for fold in range(1, CV_FOLDS + 1):
+        model_path = os.path.join(WEIGHTS_DIR, f"best_model_fold_{fold}.pth")
+        if os.path.exists(model_path):
+            try:
+                checkpoint = torch.load(
+                    model_path, map_location="cpu", weights_only=False
+                )
+                existing_models.append(
+                    {
+                        "fold": fold,
+                        "model_path": model_path,
+                        "val_auc": checkpoint.get("val_auc", 0.0),
+                        "scaler": checkpoint.get("scaler", None),
+                        "best_val_auc": checkpoint.get("val_auc", 0.0),
+                        "fold_metrics": [],
+                    }
+                )
+                print(
+                    f"Found existing model for fold {fold} with AUC: {checkpoint.get('val_auc', 0.0):.4f}"
+                )
+            except Exception as e:
+                print(f"Warning: Could not load model for fold {fold}: {e}")
+                return None
+        else:
+            return None
+
+    if len(existing_models) == CV_FOLDS:
+        print(f"Found all {CV_FOLDS} trained models. Skipping training.")
+        return existing_models
+    else:
+        return None
 
 
 class CollisionClassifier(nn.Module):
@@ -225,76 +261,6 @@ class FeaturesDataset(Dataset):
         return self.features[idx], self.labels[idx]
 
 
-train_dataset = FeaturesDataset(X_tr, y_tr)
-val_dataset = FeaturesDataset(X_val, y_val)
-train_loader = DataLoader(train_dataset, batch_size=BATCH_SIZE, shuffle=True)
-val_loader = DataLoader(val_dataset, batch_size=BATCH_SIZE, shuffle=False)
-
-model = CollisionClassifier(input_dim=FEAT_DIM).to(device)
-criterion = nn.BCELoss()
-optimizer = optim.Adam(model.parameters(), lr=INITIAL_LR, weight_decay=WEIGHT_DECAY)
-total_steps = NUM_EPOCHS * len(train_loader)
-scheduler = optim.lr_scheduler.OneCycleLR(
-    optimizer,
-    max_lr=MAX_LR,
-    total_steps=total_steps,
-    pct_start=PCT_START,
-    div_factor=MAX_LR / INITIAL_LR if INITIAL_LR > 0 else 25,  # Avoid division by zero
-    final_div_factor=INITIAL_LR / FINAL_LR
-    if FINAL_LR > 0
-    else 1e4,  # Avoid division by zero
-    anneal_strategy="cos",
-)
-
-fig, (ax1, ax2, ax3) = plt.subplots(1, 3, figsize=(15, 5))
-fig.suptitle(
-    f"Baseline Training Progress ({percentage_str}% data, N{NUM_FRAMES})", fontsize=16
-)
-train_losses, val_losses, val_aucs, learning_rates, epochs_list = [], [], [], [], []
-(line1,) = ax1.plot([], [], "b-", label="Training Loss")
-(line2,) = ax1.plot([], [], "r-", label="Validation Loss")
-(line3,) = ax2.plot([], [], "g-", label="Validation AUC")
-(line4,) = ax3.plot([], [], "orange", label="Learning Rate")
-ax1.set_xlabel("Epoch")
-ax1.set_ylabel("Loss")
-ax1.set_title("Loss")
-ax1.legend(frameon=False)
-ax2.set_xlabel("Epoch")
-ax2.set_ylabel("AUC")
-ax2.set_title("Validation AUC")
-ax2.legend(frameon=False)
-ax3.set_xlabel("Epoch")
-ax3.set_ylabel("Learning Rate")
-ax3.set_title("LR Schedule")
-ax3.set_yscale("log")
-ax3.legend(frameon=False)
-plt.tight_layout()
-
-
-def update_plots():
-    line1.set_data(epochs_list, train_losses)
-    line2.set_data(epochs_list, val_losses)
-    line3.set_data(epochs_list, val_aucs)
-    line4.set_data(epochs_list, learning_rates)
-    if epochs_list:
-        for ax in [ax1, ax2, ax3]:
-            ax.set_xlim(0, max(epochs_list) + 1)
-        if train_losses and val_losses:
-            ax1.set_ylim(
-                min(train_losses + val_losses) * 0.9,
-                max(train_losses + val_losses) * 1.05,
-            )
-        if val_aucs:
-            ax2.set_ylim(
-                min(val_aucs) * 0.9 if min(val_aucs) > 0 else -0.1,
-                max(val_aucs) * 1.1 if max(val_aucs) < 1 else 1.0,
-            )
-        if learning_rates:
-            ax3.set_ylim(min(learning_rates) * 0.5, max(learning_rates) * 2.0)
-    fig.canvas.draw()
-    fig.canvas.flush_events()
-
-
 def train_epoch_baseline(model, train_loader, criterion, optimizer, scheduler, device):
     model.train()
     total_loss = 0
@@ -329,141 +295,260 @@ def validate_baseline(model, val_loader, criterion, device):
     except ValueError:
         print("AUC error in validation")
         auc = 0.0
-    return avg_loss, auc
+    return avg_loss, auc, predictions
 
 
-best_auc = 0.0
-metrics_data = []
-final_auc = 0.0
-print("Starting baseline training...")
-for epoch in range(NUM_EPOCHS):
-    train_loss = train_epoch_baseline(
-        model, train_loader, criterion, optimizer, scheduler, device
-    )
-    val_loss, val_auc = validate_baseline(model, val_loader, criterion, device)
-    current_lr = optimizer.param_groups[0]["lr"]
-    epochs_list.append(epoch + 1)
-    train_losses.append(train_loss)
-    val_losses.append(val_loss)
-    val_aucs.append(val_auc)
-    learning_rates.append(current_lr)
-    metrics_data.append(
-        {
-            "epoch": epoch + 1,
-            "train_loss": train_loss,
-            "val_loss": val_loss,
-            "val_auc": val_auc,
-            "lr": current_lr,
-        }
-    )
+def run_cross_validation():
+    """Run 5-fold cross-validation"""
 
-    MODEL_SAVE_PATH = os.path.join(
-        WEIGHTS_DIR, f"best_model_baseline_{percentage_str}pct_N{NUM_FRAMES}.pth"
-    )
-    if val_auc > best_auc:
-        best_auc = val_auc
-        torch.save(model.state_dict(), MODEL_SAVE_PATH)
-    if (epoch + 1) % PRINT_FREQUENCY == 0:
-        print(
-            f"Epoch {epoch + 1}/{NUM_EPOCHS} | Train Loss: {train_loss:.4f} | Val Loss: {val_loss:.4f} | Val AUC: {val_auc:.4f} | LR: {current_lr:.2e} | Best AUC: {best_auc:.4f}"
+    existing_models = check_existing_models()
+    if existing_models is not None:
+        return existing_models, None, None
+
+    print("Loading/extracting features for CV data...")
+    X_cv = load_or_extract_features(cv_data, "cv")
+    y_cv = cv_data["target"].values
+
+    print("Loading/extracting features for final test data...")
+    X_final_test = load_or_extract_features(final_test_data, "final_test")
+    y_final_test = final_test_data["target"].values
+
+    cv_results = []
+    skf = StratifiedKFold(n_splits=CV_FOLDS, shuffle=True, random_state=RANDOM_STATE)
+
+    for fold, (train_idx, val_idx) in enumerate(skf.split(X_cv, y_cv)):
+        print(f"\n=== FOLD {fold + 1}/{CV_FOLDS} ===")
+
+        model_path = os.path.join(WEIGHTS_DIR, f"best_model_fold_{fold + 1}.pth")
+        if os.path.exists(model_path):
+            try:
+                checkpoint = torch.load(
+                    model_path, map_location="cpu", weights_only=False
+                )
+                print(
+                    f"Found existing model for fold {fold + 1} with AUC: {checkpoint.get('val_auc', 0.0):.4f}"
+                )
+                cv_results.append(
+                    {
+                        "fold": fold + 1,
+                        "best_val_auc": checkpoint.get("val_auc", 0.0),
+                        "model_path": model_path,
+                        "scaler": checkpoint.get("scaler", None),
+                        "fold_metrics": [],
+                    }
+                )
+                continue
+            except Exception as e:
+                print(
+                    f"Warning: Could not load existing model for fold {fold + 1}: {e}"
+                )
+                print("Will retrain this fold.")
+
+        X_train_fold, X_val_fold = X_cv[train_idx], X_cv[val_idx]
+        y_train_fold, y_val_fold = y_cv[train_idx], y_cv[val_idx]
+
+        scaler = StandardScaler()
+        X_train_scaled = scaler.fit_transform(X_train_fold)
+        X_val_scaled = scaler.transform(X_val_fold)
+
+        train_dataset = FeaturesDataset(X_train_scaled, y_train_fold)
+        val_dataset = FeaturesDataset(X_val_scaled, y_val_fold)
+        train_loader = DataLoader(train_dataset, batch_size=BATCH_SIZE, shuffle=True)
+        val_loader = DataLoader(val_dataset, batch_size=BATCH_SIZE, shuffle=False)
+
+        model = CollisionClassifier(input_dim=FEAT_DIM).to(device)
+        criterion = nn.BCELoss()
+        optimizer = optim.Adam(
+            model.parameters(), lr=INITIAL_LR, weight_decay=WEIGHT_DECAY
         )
-    if (epoch + 1) % PLOT_UPDATE_FREQUENCY == 0:
-        update_plots()
-update_plots()
 
-METRICS_CSV_PATH = os.path.join(
-    RESULTS_DIR, f"training_metrics_baseline_{percentage_str}pct_N{NUM_FRAMES}.csv"
-)
-PLOT_FILENAME = os.path.join(
-    RESULTS_DIR, f"training_curves_baseline_{percentage_str}pct_N{NUM_FRAMES}.png"
-)
-SUBMISSION_FILENAME = os.path.join(
-    RESULTS_DIR, f"submission_baseline_{percentage_str}pct_N{NUM_FRAMES}.csv"
-)
-HISTORY_FILENAME = os.path.join(
-    RESULTS_DIR, f"training_history_baseline_{percentage_str}pct_N{NUM_FRAMES}.npy"
-)
-MODEL_SAVE_PATH = os.path.join(
-    WEIGHTS_DIR, f"best_model_baseline_{percentage_str}pct_N{NUM_FRAMES}.pth"
-)  # Re-affirm for loading
+        total_steps = NUM_EPOCHS * len(train_loader)
+        scheduler = optim.lr_scheduler.OneCycleLR(
+            optimizer,
+            max_lr=MAX_LR,
+            total_steps=total_steps,
+            pct_start=PCT_START,
+            div_factor=MAX_LR / INITIAL_LR if INITIAL_LR > 0 else 25,
+            final_div_factor=INITIAL_LR / FINAL_LR if FINAL_LR > 0 else 1e4,
+            anneal_strategy="cos",
+        )
 
-if SAVE_METRICS_CSV:
-    pd.DataFrame(metrics_data).to_csv(METRICS_CSV_PATH, index=False)
-    print(f"Metrics saved to {METRICS_CSV_PATH}")
+        best_auc = 0.0
+        fold_metrics = []
 
-if os.path.exists(MODEL_SAVE_PATH):
-    model.load_state_dict(torch.load(MODEL_SAVE_PATH))
-    print(f"Loaded best model from {MODEL_SAVE_PATH}")
-    _, final_auc = validate_baseline(model, val_loader, criterion, device)
-    print(f"\nFinal Validation ROC-AUC (best model): {final_auc:.4f}")
-else:
-    print(f"Best model path not found: {MODEL_SAVE_PATH}")
+        for epoch in range(NUM_EPOCHS):
+            train_loss = train_epoch_baseline(
+                model, train_loader, criterion, optimizer, scheduler, device
+            )
+            val_loss, val_auc, _ = validate_baseline(
+                model, val_loader, criterion, device
+            )
+            current_lr = optimizer.param_groups[0]["lr"]
 
-plt.savefig(PLOT_FILENAME, dpi=300, bbox_inches="tight")
-print(f"Plot saved to {PLOT_FILENAME}")
-plt.ioff()
-plt.show()
+            fold_metrics.append(
+                {
+                    "fold": fold + 1,
+                    "epoch": epoch + 1,
+                    "train_loss": train_loss,
+                    "val_loss": val_loss,
+                    "val_auc": val_auc,
+                    "lr": current_lr,
+                }
+            )
 
-X_test_scaled = scaler.transform(X_test)
-test_dataset = FeaturesDataset(X_test_scaled, np.zeros(len(X_test_scaled)))
-test_loader = DataLoader(test_dataset, batch_size=BATCH_SIZE, shuffle=False)
-model.eval()
-test_predictions = []
-with torch.no_grad():
-    for features_batch, _ in test_loader:
-        features_batch = features_batch.to(device)
-        outputs = model(features_batch)
-        test_predictions.extend(outputs.cpu().numpy().flatten())
-submission = pd.DataFrame({"id": df_test["id"], "score": test_predictions})
-submission.to_csv(SUBMISSION_FILENAME, index=False)
-print(f"Submission saved to {SUBMISSION_FILENAME}")
+            if val_auc > best_auc:
+                best_auc = val_auc
+                torch.save(
+                    {
+                        "model_state_dict": model.state_dict(),
+                        "scaler": scaler,
+                        "fold": fold + 1,
+                        "epoch": epoch + 1,
+                        "val_auc": val_auc,
+                    },
+                    model_path,
+                )
 
-history = {
-    "train_losses": train_losses,
-    "val_losses": val_losses,
-    "val_aucs": val_aucs,
-    "lr": learning_rates,
-    "best_auc": best_auc,
-    "final_auc": final_auc,
-    "dataset_percentage": DATASET_PERCENTAGE,
-    "num_frames": NUM_FRAMES,
-}
-np.save(HISTORY_FILENAME, history)
-print(f"History saved to {HISTORY_FILENAME}")
+            if (epoch + 1) % PRINT_FREQUENCY == 0:
+                print(
+                    f"Epoch {epoch + 1}/{NUM_EPOCHS} | "
+                    f"Train Loss: {train_loss:.4f} | "
+                    f"Val Loss: {val_loss:.4f} | "
+                    f"Val AUC: {val_auc:.4f} | "
+                    f"Best AUC: {best_auc:.4f}"
+                )
 
-summary_path = os.path.join(
-    RESULTS_DIR, f"training_summary_baseline_{percentage_str}pct_N{NUM_FRAMES}.txt"
-)
-with open(summary_path, "w") as f:
-    f.write("BASELINE MLP TRAINING SUMMARY\n=============================\n")
-    f.write(f"Timestamp: {pd.Timestamp.now()}\n")
-    f.write(
-        f"Dataset Percentage: {DATASET_PERCENTAGE * 100}%\nNumber of Videos (train sample): {len(df)}\n"
+        cv_results.append(
+            {
+                "fold": fold + 1,
+                "best_val_auc": best_auc,
+                "model_path": model_path,
+                "scaler": scaler,
+                "fold_metrics": fold_metrics,
+            }
+        )
+
+        print(f"Fold {fold + 1} completed. Best AUC: {best_auc:.4f}")
+
+    return cv_results, X_final_test, y_final_test
+
+
+def evaluate_final_test(cv_results, X_final_test, y_final_test):
+    """Evaluate on final test set using ensemble of CV models"""
+
+    if X_final_test is None:
+        print("Loading final test features for evaluation...")
+        X_final_test = load_or_extract_features(final_test_data, "final_test")
+        y_final_test = final_test_data["target"].values
+
+    all_predictions = []
+
+    for fold_result in cv_results:
+        model = CollisionClassifier(input_dim=FEAT_DIM).to(device)
+        checkpoint = torch.load(
+            fold_result["model_path"], map_location=device, weights_only=False
+        )
+        model.load_state_dict(checkpoint["model_state_dict"])
+        scaler = fold_result["scaler"]
+
+        X_test_scaled = scaler.transform(X_final_test)
+
+        test_dataset = FeaturesDataset(X_test_scaled, y_final_test)
+        test_loader = DataLoader(test_dataset, batch_size=BATCH_SIZE, shuffle=False)
+
+        model.eval()
+        fold_predictions = []
+
+        with torch.no_grad():
+            for features, _ in test_loader:
+                features = features.to(device)
+                outputs = model(features)
+                fold_predictions.extend(outputs.cpu().numpy().flatten())
+
+        all_predictions.append(fold_predictions)
+
+    ensemble_predictions = np.mean(all_predictions, axis=0)
+    final_auc = roc_auc_score(y_final_test, ensemble_predictions)
+
+    return final_auc, ensemble_predictions
+
+
+def save_cv_results(cv_results, final_auc):
+    """Save cross-validation results"""
+    percentage_str = str(int(DATASET_PERCENTAGE * 100))
+
+    all_metrics = []
+    for result in cv_results:
+        fold_metrics = result.get("fold_metrics", [])
+        all_metrics.extend(fold_metrics)
+
+    if all_metrics:
+        metrics_df = pd.DataFrame(all_metrics)
+        metrics_path = os.path.join(
+            RESULTS_DIR, f"cv_metrics_baseline_{percentage_str}pct_N{NUM_FRAMES}.csv"
+        )
+        metrics_df.to_csv(metrics_path, index=False)
+        print(f"Detailed metrics saved to: {metrics_path}")
+    else:
+        metrics_path = "No detailed metrics (models were pre-trained)"
+        print("No detailed metrics to save (models were pre-trained)")
+
+    fold_summary = pd.DataFrame(
+        [
+            {
+                "fold": result["fold"],
+                "best_val_auc": result["best_val_auc"],
+            }
+            for result in cv_results
+        ]
     )
-    f.write(
-        f"Number of Frames per Video: {NUM_FRAMES}\nFeature Dimension (InceptionV3): {FEAT_DIM}\n"
+
+    fold_summary_path = os.path.join(
+        RESULTS_DIR, f"cv_fold_summary_{percentage_str}pct_N{NUM_FRAMES}.csv"
     )
-    f.write(f"Hidden Dimensions: {HIDDEN_DIMS}\nDropout Rate: {DROPOUT_RATE}\n")
-    f.write(
-        f"Epochs: {NUM_EPOCHS}\nBatch Size: {BATCH_SIZE}\nOptimizer: Adam, Weight Decay: {WEIGHT_DECAY}\n"
+    fold_summary.to_csv(fold_summary_path, index=False)
+
+    fold_aucs = [result["best_val_auc"] for result in cv_results]
+
+    summary_path = os.path.join(
+        RESULTS_DIR, f"cv_summary_baseline_{percentage_str}pct_N{NUM_FRAMES}.txt"
     )
-    f.write(
-        f"Scheduler: OneCycleLR (Initial: {INITIAL_LR}, Max: {MAX_LR}, Final: {FINAL_LR})\n"
-    )
-    f.write(
-        f"Best Validation AUC: {best_auc:.4f}\nFinal Validation AUC (loaded best model): {final_auc:.4f}\n\n"
-    )
-    f.write("PATHS:\n")
-    f.write(f"  Aggregated CNN Features: {FEATURES_ROOT_DIR}\n")
-    f.write(f"  Intermediate Uniform Frames: {UNIFORM_FRAMES_DIR}\n")
-    f.write(f"  Results: {RESULTS_DIR}\n")
-    f.write(f"  Weights: {WEIGHTS_DIR}\n")
-    f.write(f"  Model Saved: {MODEL_SAVE_PATH}\n")
-    f.write(f"  Plot: {PLOT_FILENAME}\n")
-    f.write(f"  Metrics CSV: {METRICS_CSV_PATH}\n")
-    f.write(f"  History Numpy: {HISTORY_FILENAME}\n")
-    f.write(f"  Submission: {SUBMISSION_FILENAME}\n")
-print(f"Training summary saved to {summary_path}")
-print(
-    f"\nBASELINE MLP SUMMARY\nDataset: {percentage_str}% ({len(df)} samples), Frames: {NUM_FRAMES}\nBest AUC: {best_auc:.4f}, Final AUC: {final_auc:.4f}"
+
+    with open(summary_path, "w") as f:
+        f.write("5-FOLD CROSS-VALIDATION RESULTS\n\n")
+        f.write(f"Dataset: {DATASET_PERCENTAGE * 100}% of training data\n")
+        f.write(f"Samples: CV={len(cv_data)}, Test={len(final_test_data)}\n")
+
+        f.write("\nResults:\n")
+        for i, result in enumerate(cv_results):
+            f.write(f"Fold {result['fold']}: AUC = {result['best_val_auc']:.4f}\n")
+
+        f.write(f"\nMean CV AUC: {np.mean(fold_aucs):.4f} ± {np.std(fold_aucs):.4f}\n")
+        f.write(f"Final Test AUC: {final_auc:.4f}\n")
+
+        f.write(f"\nOutput files:\n")
+        f.write(f"- Metrics: {os.path.basename(metrics_path)}\n")
+        f.write(f"- Summary: {os.path.basename(fold_summary_path)}\n")
+
+    print(f"Results saved to {summary_path}")
+    print(f"CV AUC: {np.mean(fold_aucs):.4f} ± {np.std(fold_aucs):.4f}")
+    print(f"Final Test AUC: {final_auc:.4f}")
+
+    return metrics_path, fold_summary_path, summary_path
+
+
+print("Starting 5-fold cross-validation...")
+cv_results, X_final_test, y_final_test = run_cross_validation()
+
+print("\nEvaluating on final test set...")
+final_auc, final_predictions = evaluate_final_test(
+    cv_results, X_final_test, y_final_test
 )
+
+print("\nSaving results...")
+save_cv_results(cv_results, final_auc)
+
+print(f"\n CROSS-VALIDATION COMPLETED")
+fold_aucs = [result["best_val_auc"] for result in cv_results]
+print(f"CV AUC: {np.mean(fold_aucs):.4f} ± {np.std(fold_aucs):.4f}")
+print(f"Final Test AUC: {final_auc:.4f}")

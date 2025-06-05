@@ -1,3 +1,7 @@
+"""
+Data loading utilities for video sequence datasets.
+"""
+
 import numpy as np
 import pandas as pd
 import torch
@@ -34,7 +38,7 @@ class VideoSequenceDataset(Dataset):
             features = self.transform(features)
 
         if self.labels is not None:
-            return features, self.labels[idx].unsqueeze(0)  # Add dimension for BCELoss
+            return features, self.labels[idx].unsqueeze(0)
         else:
             return features
 
@@ -54,7 +58,7 @@ def load_preprocessed_data(features_dir, dataset_percentage=1.0, random_state=42
         y_train: Training labels
         scaler: Fitted StandardScaler object
     """
-    # Construct file paths
+
     percentage_str = str(int(dataset_percentage * 100))
     train_features_file = os.path.join(
         features_dir, f"X_train_sequences_{percentage_str}pct.npy"
@@ -64,18 +68,15 @@ def load_preprocessed_data(features_dir, dataset_percentage=1.0, random_state=42
         features_dir, f"scaler_attention_{percentage_str}pct.joblib"
     )
 
-    # Load features
     print(f"Loading training features from {train_features_file}")
     X_train_sequences = np.load(train_features_file)
     print(f"Loading test features from {test_features_file}")
     X_test_sequences = np.load(test_features_file)
 
-    # Load labels
     data_base_path = os.path.expanduser("./data-nexar/")
     df = pd.read_csv(os.path.join(data_base_path, "train.csv"))
     df["id"] = df["id"].astype(str).str.zfill(5)
 
-    # Sample data if needed
     if dataset_percentage < 1.0:
         df = df.sample(frac=dataset_percentage, random_state=random_state).reset_index(
             drop=True
@@ -83,21 +84,18 @@ def load_preprocessed_data(features_dir, dataset_percentage=1.0, random_state=42
 
     y_train = df["target"].values
 
-    # Load or create scaler
     if os.path.exists(scaler_file):
         print(f"Loading scaler from {scaler_file}")
         scaler = joblib.load(scaler_file)
     else:
         print("Creating new scaler...")
         scaler = StandardScaler()
-        # Reshape for fitting scaler
         num_videos, num_frames, num_features = X_train_sequences.shape
         X_train_reshaped = X_train_sequences.reshape(-1, num_features)
         scaler.fit(X_train_reshaped)
         joblib.dump(scaler, scaler_file)
         print(f"Scaler saved to {scaler_file}")
 
-    # Apply scaling
     print("Scaling features...")
     X_train_scaled = scale_sequences(X_train_sequences, scaler)
     X_test_scaled = scale_sequences(X_test_sequences, scaler)
@@ -122,13 +120,9 @@ def scale_sequences(sequences, scaler):
     """
     num_videos, num_frames, num_features = sequences.shape
 
-    # Reshape to 2D for scaling
     sequences_reshaped = sequences.reshape(-1, num_features)
-
-    # Apply scaling
     sequences_scaled = scaler.transform(sequences_reshaped)
 
-    # Reshape back to original shape
     return sequences_scaled.reshape(num_videos, num_frames, num_features)
 
 
@@ -158,7 +152,7 @@ def create_data_loaders(
         val_loader: Validation DataLoader
         test_loader: Test DataLoader
     """
-    # Split training data into train and validation
+
     X_tr, X_val, y_tr, y_val = train_test_split(
         X_train,
         y_train,
@@ -167,12 +161,10 @@ def create_data_loaders(
         random_state=random_state,
     )
 
-    # Create datasets
     train_dataset = VideoSequenceDataset(X_tr, y_tr)
     val_dataset = VideoSequenceDataset(X_val, y_val)
-    test_dataset = VideoSequenceDataset(X_test)  # No labels for test set
+    test_dataset = VideoSequenceDataset(X_test)
 
-    # Create DataLoaders
     train_loader = DataLoader(
         train_dataset,
         batch_size=batch_size,
