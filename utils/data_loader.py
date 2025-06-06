@@ -13,17 +13,7 @@ import joblib
 
 
 class VideoSequenceDataset(Dataset):
-    """
-    Dataset class for loading video sequences from preprocessed .npy files.
-    """
-
     def __init__(self, features, labels=None, transform=None):
-        """
-        Args:
-            features: Numpy array of shape (num_videos, num_frames, feature_dim)
-            labels: Numpy array of shape (num_videos,) or None for test data
-            transform: Optional transform to apply to features
-        """
         self.features = torch.FloatTensor(features)
         self.labels = torch.FloatTensor(labels) if labels is not None else None
         self.transform = transform
@@ -44,21 +34,6 @@ class VideoSequenceDataset(Dataset):
 
 
 def load_preprocessed_data(features_dir, dataset_percentage=1.0, random_state=42):
-    """
-    Load preprocessed feature sequences from .npy files.
-
-    Args:
-        features_dir: Directory containing the .npy files
-        dataset_percentage: Percentage of training data to use
-        random_state: Random seed for reproducibility
-
-    Returns:
-        X_train_sequences: Training features
-        X_test_sequences: Test features
-        y_train: Training labels
-        scaler: Fitted StandardScaler object
-    """
-
     percentage_str = str(int(dataset_percentage * 100))
     train_features_file = os.path.join(
         features_dir, f"X_train_sequences_{percentage_str}pct.npy"
@@ -108,16 +83,6 @@ def load_preprocessed_data(features_dir, dataset_percentage=1.0, random_state=42
 
 
 def scale_sequences(sequences, scaler):
-    """
-    Apply scaling to sequence data.
-
-    Args:
-        sequences: Numpy array of shape (num_videos, num_frames, num_features)
-        scaler: Fitted StandardScaler object
-
-    Returns:
-        scaled_sequences: Scaled sequences with same shape as input
-    """
     num_videos, num_frames, num_features = sequences.shape
 
     sequences_reshaped = sequences.reshape(-1, num_features)
@@ -135,24 +100,6 @@ def create_data_loaders(
     random_state=42,
     num_workers=4,
 ):
-    """
-    Create DataLoaders for training, validation, and testing.
-
-    Args:
-        X_train: Training features
-        X_test: Test features
-        y_train: Training labels
-        test_size: Fraction of training data to use for validation
-        batch_size: Batch size for DataLoaders
-        random_state: Random seed for train/val split
-        num_workers: Number of workers for DataLoaders
-
-    Returns:
-        train_loader: Training DataLoader
-        val_loader: Validation DataLoader
-        test_loader: Test DataLoader
-    """
-
     X_tr, X_val, y_tr, y_val = train_test_split(
         X_train,
         y_train,

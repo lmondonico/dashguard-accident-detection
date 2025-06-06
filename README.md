@@ -66,62 +66,68 @@ DashGuard processes dashcam video by:
     ```
 4.  **Download the Dataset:**
     * Obtain the NEXAR Dataset and place it in `./data-nexar/` as per script expectations.
-5.  **Cache Directory:**
-    * Scripts use `./cache` for `TORCH_HOME`.
 
 ## Usage
 
 ### Data Preprocessing
 
-* Scripts like `code/utils/optical-flow-feature-extractor.py` and classes like `MultimodalFeatureExtractor` in `code/models/dashguard_crossvalidation.py` handle frame extraction (uniform for flow, crash-focused for RGB), optical flow calculation, and feature extraction using CNNs.
+* Scripts like `./utils/optical-flow-feature-extractor.py` and classes like `MultimodalFeatureExtractor` in `./models/dashguard_crossvalidation.py` handle frame extraction (uniform for flow, crash-focused for RGB), optical flow calculation, and feature extraction using CNNs.
 * Features are saved as `.npy` files in directories like `features/optical_flow/`, `features/ablation_cache/`, etc.
     Ensure dataset paths and parameters (`NUM_FRAMES`, `FRAME_SIZE`) are correctly set in the scripts.
 
 ### Training Models
 
 1.  **Baseline Model:**
-    * Script: `code/models/baseline.py` (InceptionV3 features, FC classifier, 5-fold CV).
-    * Run: `python code/models/baseline.py`
+    * Script: `./models/baseline.py` (InceptionV3 features, FC classifier, 5-fold CV).
+    * Run: `python ./models/baseline.py`
     * Outputs: `results/baseline_cv/`.
 
 2.  **DashGuard (Hierarchical Transformer) with Cross-Validation:**
-    * Script: `code/models/dashguard_crossvalidation.py` (EfficientNet-B3, multimodal features, Hierarchical Transformer, 5-fold CV).
-    * Run: `python code/models/dashguard_crossvalidation.py`
+    * Script: `./models/dashguard_crossvalidation.py` (EfficientNet-B3, multimodal features, Hierarchical Transformer, 5-fold CV).
+    * Run: `python ./models/dashguard_crossvalidation.py`
     * Outputs: `results/cv_efficientnet_multimodal/`, feature directories.
 
 3.  **Ablation Studies:**
-    * Script: `code/models/ablation_study.py` (various model configurations).
-    * Run: `python code/models/ablation_study.py`
+    * Script: `./models/ablation_study.py` (various model configurations).
+    * Run: `python ./models/ablation_study.py`
     * Outputs: `results/ablation_studies/`.
 
 ### Evaluation
 
-* Metrics (ROC-AUC, accuracy, etc.) are calculated by training scripts using `code/utils/calculate_metrics.py`.
+* Metrics (ROC-AUC, accuracy, etc.) are calculated by training scripts using `./utils/calculate_metrics.py`.
 * Confusion matrices and training curves are saved by the scripts.
 
 ### Failure Mode Analysis
 
-* Script: `code/models/failure_mode_analysis.py` (identifies FNs and FPs for a specific model).
-* Run: `python code/models/failure_mode_analysis.py`
+* Script: `./models/failure_mode_analysis.py` (identifies FNs and FPs for a specific model).
+* Run: `python ./models/failure_mode_analysis.py`
 * Outputs: Video IDs in `results/video_id_check/`.
 
 ### Visualizing Optical Flow
 
-* Script: `code/utils/visualize-optical-flow.py`
-* Modify `VIDEO_ID_TO_VISUALIZE` and run: `python code/utils/visualize-optical-flow.py`
+* Script: `./utils/visualize-optical-flow.py`
+* Modify `VIDEO_ID_TO_VISUALIZE` and run: `python ./utils/visualize-optical-flow.py`
 
 
 ## License
 
-This project is licensed under the MIT License - see the [LICENSE.md](LICENSE.md) file for details.
-*(You'll need to create a LICENSE.md file with the MIT license text).*
+This project is licensed under the MIT License.
 
 ## Directory Structure
 
 ```
-├── CS231N_ProjectReport.pdf
+├── DashGuard_ProjectReport.pdf
 ├── README.md
-├── code/
-│   ├── models/
-│   └── utils/
+├── .gitignore
+├── models/
+│   ├── ablation_study.py
+│   ├── baseline.py
+│   ├── dashguard_crossvalidation.py
+│   ├── failure_mode_analysis.py
+│   └── module_hierarchical_transformer.py
+├── utils/
+│   ├── calculate_metrics.py
+│   ├── data_loader.py
+│   ├── optical-flow-feature-extractor.py
+│   └── visualize-optical-flow.py
 ```

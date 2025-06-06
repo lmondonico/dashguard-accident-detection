@@ -8,7 +8,6 @@ from sklearn.metrics import precision_score, recall_score, f1_score, accuracy_sc
 
 
 def calculate_metrics(y_true, y_pred, threshold=0.5):
-    """Calculate classification metrics."""
     y_pred_binary = (np.array(y_pred) > threshold).astype(int)
     y_true = np.array(y_true)
 
