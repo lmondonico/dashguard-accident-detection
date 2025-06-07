@@ -57,7 +57,7 @@ DashGuard processes dashcam video by:
     ```
 2.  **Create a Python environment:**
     ```bash
-    conda create -n dashguard python=3.8
+    conda create -n dashguard python=3.12
     conda activate dashguard
     ```
 3.  **Install dependencies:**
@@ -116,8 +116,8 @@ This project is licensed under the MIT License.
 ## Directory Structure
 
 ```
-├── DashGuard_ProjectReport.pdf
 ├── README.md
+├── environment.yml
 ├── .gitignore
 ├── models/
 │   ├── ablation_study.py
