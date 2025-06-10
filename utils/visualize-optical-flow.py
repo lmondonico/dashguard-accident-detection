@@ -17,7 +17,7 @@ VIDEO_SET_DIRECTORY = TRAIN_VIDEO_DIR
 
 NUM_FRAMES_TO_EXTRACT = 30
 FRAME_SIZE = (1280, 720)
-QUIVER_STEP = 30
+QUIVER_STEP = 35
 
 
 def extract_rgb_frames(video_path, num_frames=NUM_FRAMES_TO_EXTRACT, size=FRAME_SIZE):
@@ -134,20 +134,20 @@ class OpticalFlowNavigator:
 
         fx, fy = flow_field[y, x].T
 
-        self.ax.imshow(base_rgb_frame)
+        self.ax.imshow(base_rgb_frame, alpha=0.8)
         self.ax.quiver(
             x,
             y,
             fx,
             fy,
-            color="red",
+            color="palegreen",
             angles="xy",
             scale_units="xy",
-            scale=1,
-            headwidth=3,
-            headlength=4,
-            width=0.002,
-            alpha=0.9,
+            scale=0.7,
+            headwidth=3.3,
+            headlength=4.3,
+            width=0.003,
+            alpha=1.0,
         )
 
         frame_idx_str = self.current_flow_index
